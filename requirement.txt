@@ -1,0 +1,15 @@
+playwright
+opencv-python
+Pillow
+pytesseract
+sentence-transformers
+faiss-cpu
+pydantic
+networkx
+python-dotenv
+tenacity
+openai
+# Optional image embedding backend:
+# open_clip_torch
+# If using custom LLM API instead of OpenAI:
+# httpx
