@@ -33,18 +33,38 @@ from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
-from .errors import CollectError
-from .utils import (
-    sanitize_domain,
-    timestamp_yyyymmddhhmmss,
-    ensure_unique_dir,
-    write_json,
-    validate_url,
-    parse_viewport,
-)
-from .constants import DEFAULT_VIEWPORT, DETECT_SPEC_VERSION, ARTIFACTS
-from .context_utils import make_context_args
-from .scrolling import auto_scroll_full_page as _auto_scroll_full_page
+try:
+    from .errors import CollectError  # type: ignore
+    from .utils import (  # type: ignore
+        sanitize_domain,
+        timestamp_yyyymmddhhmmss,
+        ensure_unique_dir,
+        write_json,
+        validate_url,
+        parse_viewport,
+    )
+    from .constants import DEFAULT_VIEWPORT, DETECT_SPEC_VERSION, ARTIFACTS  # type: ignore
+    from .context_utils import make_context_args  # type: ignore
+    from .scrolling import auto_scroll_full_page as _auto_scroll_full_page  # type: ignore
+    from .controls_tree import write_controls_tree  # type: ignore
+    from .overlay import draw_overlay  # type: ignore
+    from .icon_patches import generate_icon_patches  # type: ignore
+except Exception:
+    from errors import CollectError  # type: ignore
+    from utils import (  # type: ignore
+        sanitize_domain,
+        timestamp_yyyymmddhhmmss,
+        ensure_unique_dir,
+        write_json,
+        validate_url,
+        parse_viewport,
+    )
+    from constants import DEFAULT_VIEWPORT, DETECT_SPEC_VERSION, ARTIFACTS  # type: ignore
+    from context_utils import make_context_args  # type: ignore
+    from scrolling import auto_scroll_full_page as _auto_scroll_full_page  # type: ignore
+    from controls_tree import write_controls_tree  # type: ignore
+    from overlay import draw_overlay  # type: ignore
+    from icon_patches import generate_icon_patches  # type: ignore
 
 JS_HELPERS_FILE = os.path.join(os.path.dirname(__file__), "collect_playwright.js")
 
@@ -54,7 +74,7 @@ JS_HELPERS_FILE = os.path.join(os.path.dirname(__file__), "collect_playwright.js
 
 def collect(
     url: str,
-    out_root: str = "data",
+    out_root: str = "workspace/data",
     timeout_ms: int = 45000,
     *,
     raise_on_error: bool = False,
@@ -65,6 +85,11 @@ def collect(
     viewport: str | tuple[int, int] | None = None,
     dpr: float | None = None,
     return_info: bool = False,
+    enable_container_stitch: bool = True,
+    max_stitch_segments: int = 30,
+    max_stitch_seconds: int = 10,
+    enable_overlay: bool = True,
+    max_stitch_pixels: int = 40000000,
 ) -> str | Dict[str, Any]:
     """
     Collect page artifacts using Playwright and save under data/<domain>/<timestamp>/.
@@ -212,7 +237,10 @@ def collect(
             # dom_summary.json — lightweight DOM table via helper JS (advanced)
             try:
                 if injected_helpers:
-                    dom_summary = page.evaluate("(limit, opts) => window.DetectHelpers.getDomSummaryAdvanced(limit, opts)", 20000, {"occlusionStep": 8})
+                    dom_summary = page.evaluate(
+                        "(p) => window.DetectHelpers.getDomSummaryAdvanced(p.limit, p.opts)",
+                        {"limit": 20000, "opts": {"occlusionStep": 8}},
+                    )
                 else:
                     dom_summary = page.evaluate("Array.from(document.querySelectorAll('*')).slice(0, 500).map((e,i)=>({index:i,tag:(e.tagName||'').toLowerCase(),id:e.id||null}))")
             except Exception as de:
@@ -257,7 +285,7 @@ def collect(
                         warnings.append({"code": "AUTOSCROLL_CAP_REACHED", "stage": "autosupport", "info": {"max_steps": autoscroll_max_steps}})
                     # After scrolling, a short idle wait can help late resources settle
                     try:
-                        page.wait_for_load_state("networkidle", timeout=1500)
+                        page.wait_for_load_state("networkidle", timeout=3000)
                     except PlaywrightTimeoutError:
                         pass
                 except Exception as se:
@@ -269,11 +297,220 @@ def collect(
             except Exception:
                 doc_after = {"scrollHeight": None, "clientHeight": None}
 
-            # Optionally capture bottom viewport (tail) to emphasize scrolled-in content
+            # 容器感知 + 限额：优先拼接容器整图，否则退回 fullPage；并输出若干局部片段
+            container_info = None
+            stitched_ok = False
+            seg_meta: list[dict[str, int]] = []
             try:
-                page.screenshot(path=os.path.join(out_dir, ARTIFACTS["screenshot_scrolled_tail"]), full_page=False)
-            except Exception as ee:
-                warnings.append({"code": "SCREENSHOT_TAIL_ERROR", "stage": "screenshot_tail", "error": str(ee)})
+                # 限额常量（可按需微调）
+                MAX_SEGMENTS = 20
+                MAX_SECONDS = 8
+                PIXEL_CAP = 25_000_000  # 约 25MP
+
+                if injected_helpers:
+                    container_info = page.evaluate("() => window.DetectHelpers.findMainScrollContainer()")
+                if container_info and container_info.get("selector") and (container_info.get("scrollHeight", 0) > container_info.get("clientHeight", 0) + 50):
+                    sel = container_info["selector"]
+                    el = page.query_selector(sel)
+                    if el:
+                        # 回到顶部
+                        try:
+                            page.evaluate("(s)=>window.DetectHelpers.scrollContainerTo(s,0)", sel)
+                        except Exception:
+                            pass
+                        from io import BytesIO
+                        from PIL import Image
+                        import time as _t
+                        segs = []
+                        max_width = 0
+                        step_px = int(min(max(200, (context_args.get("viewport", {}).get("height", 800) * 0.9)), 1600))
+                        metrics = page.evaluate("(s)=>window.DetectHelpers.getContainerMetrics(s)", sel) or {}
+                        sh = int(metrics.get("scrollHeight") or container_info.get("scrollHeight") or 0)
+                        ch = int(metrics.get("clientHeight") or container_info.get("clientHeight") or 0)
+                        if sh > 0 and ch > 0:
+                            last_top = -1
+                            t0 = _t.monotonic()
+                            for i in range(MAX_SEGMENTS):
+                                if _t.monotonic() - t0 > MAX_SECONDS:
+                                    warnings.append({"code": "CONTAINER_STITCH_LIMIT", "stage": "container_capture", "info": {"reason": "time_limit", "seconds": MAX_SECONDS}})
+                                    break
+                                try:
+                                    # 目标位置：基于上次 top 累进，避免跳跃过大
+                                    met_prev = page.evaluate("(s)=>window.DetectHelpers.getContainerMetrics(s)", sel) or {}
+                                    prev_top = int(met_prev.get("scrollTop", 0))
+                                    desired = min(max(0, sh - ch), prev_top + step_px)
+                                    page.evaluate("(s,t)=>window.DetectHelpers.scrollContainerTo(s,t)", sel, desired)
+                                    # 等待滚动完成或超时（提升准确度）
+                                    try:
+                                        page.wait_for_function(
+                                            "(s,t)=>{const e=document.querySelector(s); return e && Math.abs((e.scrollTop||0)-t) < 2}",
+                                            sel,
+                                            desired,
+                                            timeout=1000,
+                                        )
+                                    except Exception:
+                                        pass
+                                    # 兜底：若未推进，尝试鼠标滚轮与键盘 PageDown
+                                    try:
+                                        met_chk = page.evaluate("(s)=>window.DetectHelpers.getContainerMetrics(s)", sel) or {}
+                                        chk_top = int(met_chk.get("scrollTop", 0))
+                                        if abs(chk_top - prev_top) < 2 and chk_top < sh - ch - 2:
+                                            # hover 到容器中心
+                                            try:
+                                                bbox = el.bounding_box()
+                                                if bbox:
+                                                    page.mouse.move(bbox["x"] + bbox["width"]/2, bbox["y"] + 10)
+                                            except Exception:
+                                                pass
+                                            # 鼠标滚轮
+                                            try:
+                                                page.mouse.wheel(0, step_px)
+                                                page.wait_for_timeout(200)
+                                            except Exception:
+                                                pass
+                                            met_w = page.evaluate("(s)=>window.DetectHelpers.getContainerMetrics(s)", sel) or {}
+                                            w_top = int(met_w.get("scrollTop", 0))
+                                            if abs(w_top - prev_top) < 2 and w_top < sh - ch - 2:
+                                                # 键盘 PageDown
+                                                try:
+                                                    page.keyboard.press("PageDown")
+                                                    page.wait_for_timeout(200)
+                                                except Exception:
+                                                    pass
+                                    except Exception:
+                                        pass
+                                except Exception:
+                                    pass
+                                buf = el.screenshot(type="png")
+                                im = Image.open(BytesIO(buf)).convert("RGB")
+                                met = page.evaluate("(s)=>window.DetectHelpers.getContainerMetrics(s)", sel) or {}
+                                top = int(met.get("scrollTop", 0))
+                                overlap = max(0, (last_top + ch) - top) if last_top >= 0 else 0
+                                use_h = im.height - overlap
+                                if use_h <= 0:
+                                    break
+                                cropped = im.crop((0, overlap, im.width, overlap + use_h))
+                                segs.append(cropped)
+                                seg_meta.append({"scrollTop": top, "height": int(cropped.height), "width": int(cropped.width)})
+                                max_width = max(max_width, im.width)
+                                last_top = top
+                                if top + ch >= sh - 2:
+                                    break
+                            if segs:
+                                total_h = sum(s.height for s in segs)
+                                if PIXEL_CAP and max_width * total_h > PIXEL_CAP:
+                                    cap_h = max(1, PIXEL_CAP // max(1, max_width))
+                                    warnings.append({"code": "CONTAINER_STITCH_LIMIT", "stage": "container_capture", "info": {"reason": "pixel_limit", "cap_height": cap_h}})
+                                    acc = 0
+                                    clipped = []
+                                    for s in segs:
+                                        if acc >= cap_h:
+                                            break
+                                        take = min(s.height, cap_h - acc)
+                                        clipped.append(s.crop((0, 0, s.width, take)))
+                                        acc += take
+                                    segs = clipped
+                                    total_h = acc
+                                from PIL import Image as _Img
+                                stitched = _Img.new("RGB", (max_width, total_h), (255, 255, 255))
+                                y = 0
+                                for s in segs:
+                                    stitched.paste(s, (0, y))
+                                    y += s.height
+                                stitched.save(os.path.join(out_dir, ARTIFACTS["screenshot_scrolled_tail"]), format="PNG", optimize=True)
+                                stitched_ok = True
+                                # 保存若干局部图（最多 6 张）：顶部、中部、底部 + 额外均匀采样
+                                try:
+                                    seg_dir = os.path.join(out_dir, ARTIFACTS["segments_dir"])  # segments/
+                                    os.makedirs(seg_dir, exist_ok=True)
+                                    picks = []
+                                    n = len(segs)
+                                    if n:
+                                        picks.append(0)
+                                        if n > 2:
+                                            picks.append(n//2)
+                                        if n > 1:
+                                            picks.append(n-1)
+                                        # 均匀补充至最多 6 张
+                                        i = 1
+                                        while len(picks) < min(6, n) and i < n-1:
+                                            if i not in picks:
+                                                picks.append(i)
+                                            i += max(1, n//6)
+                                        picks = sorted(set(picks))
+                                        meta_list = []
+                                        for idx in picks:
+                                            fn = f"seg_{idx:03d}.png"
+                                            seg_path = os.path.join(seg_dir, fn)
+                                            segs[idx].save(seg_path, format="PNG", optimize=True)
+                                            m = seg_meta[idx] if idx < len(seg_meta) else {"scrollTop": 0, "height": int(segs[idx].height), "width": int(segs[idx].width)}
+                                            m.update({"file": os.path.join(ARTIFACTS["segments_dir"], fn)})
+                                            meta_list.append(m)
+                                        # 若不足 3 张，改用整页图均匀切成 3 份补齐
+                                        if len(meta_list) < 3:
+                                            try:
+                                                from PIL import Image as _Img
+                                                stitched_fp = os.path.join(out_dir, ARTIFACTS["screenshot_scrolled_tail"])
+                                                im_all = _Img.open(stitched_fp).convert("RGB")
+                                                meta_list = []
+                                                thirds = [0, im_all.height//2, max(0, im_all.height-1)]
+                                                names = ["seg_u_000.png", "seg_u_001.png", "seg_u_002.png"]
+                                                for j, y in enumerate(thirds):
+                                                    h = max(1, im_all.height//3)
+                                                    patch = im_all.crop((0, y, im_all.width, min(im_all.height, y+h)))
+                                                    fn = names[j]
+                                                    patch.save(os.path.join(seg_dir, fn), format="PNG", optimize=True)
+                                                    meta_list.append({"file": os.path.join(ARTIFACTS["segments_dir"], fn), "scrollTop": int(y), "height": int(patch.height), "width": int(patch.width)})
+                                            except Exception:
+                                                pass
+                                        # 写索引
+                                        from .utils import write_json as _wjson  # type: ignore
+                                        _wjson(os.path.join(out_dir, ARTIFACTS["segments_meta"]), {"segments": meta_list})
+                                except Exception as se_save:
+                                    warnings.append({"code": "SEGMENTS_SAVE_ERROR", "stage": "segments", "error": str(se_save)})
+            except Exception as ce:
+                warnings.append({"code": "CONTAINER_STITCH_ERROR", "stage": "container_capture", "error": str(ce)})
+
+            if not stitched_ok:
+                try:
+                    page.screenshot(path=os.path.join(out_dir, ARTIFACTS["screenshot_scrolled_tail"]), full_page=True)
+                    # fallback 情况下也生成若干均匀切片
+                    try:
+                        from PIL import Image as _Img
+                        fp = os.path.join(out_dir, ARTIFACTS["screenshot_scrolled_tail"])
+                        im = _Img.open(fp).convert("RGB")
+                        vw = context_args.get("viewport", {}).get("height", 800) or 800
+                        seg_h = max(200, int(vw))
+                        seg_dir = os.path.join(out_dir, ARTIFACTS["segments_dir"])  # segments/
+                        os.makedirs(seg_dir, exist_ok=True)
+                        meta_list = []
+                        y = 0
+                        idx = 0
+                        while y < im.height and idx < 6:
+                            h = min(seg_h, im.height - y)
+                            patch = im.crop((0, y, im.width, y + h))
+                            fn = f"seg_{idx:03d}.png"
+                            patch.save(os.path.join(seg_dir, fn), format="PNG", optimize=True)
+                            meta_list.append({"file": os.path.join(ARTIFACTS["segments_dir"], fn), "scrollTop": y, "height": int(h), "width": int(im.width)})
+                            y += h
+                            idx += 1
+                        # 若不足 3 张，改为均匀切三份
+                        if len(meta_list) < 3:
+                            meta_list = []
+                            thirds = [0, im.height//2, max(0, im.height-1)]
+                            names = ["seg_u_000.png", "seg_u_001.png", "seg_u_002.png"]
+                            for j, y in enumerate(thirds):
+                                h = max(1, im.height//3)
+                                patch = im.crop((0, y, im.width, min(im.height, y+h)))
+                                fn = names[j]
+                                patch.save(os.path.join(seg_dir, fn), format="PNG", optimize=True)
+                                meta_list.append({"file": os.path.join(ARTIFACTS["segments_dir"], fn), "scrollTop": int(y), "height": int(patch.height), "width": int(patch.width)})
+                        from .utils import write_json as _wjson  # type: ignore
+                        _wjson(os.path.join(out_dir, ARTIFACTS["segments_meta"]), {"segments": meta_list})
+                    except Exception as se2:
+                        warnings.append({"code": "SEGMENTS_FALLBACK_ERROR", "stage": "segments", "error": str(se2)})
+                except Exception as ee:
+                    warnings.append({"code": "SCREENSHOT_TAIL_ERROR", "stage": "screenshot_tail", "error": str(ee)})
 
             # screenshot_loaded.png — after load (+ networkidle if achieved)
             try:
@@ -299,7 +536,10 @@ def collect(
             new_count = None
             try:
                 if injected_helpers:
-                    dom_summary_scrolled = page.evaluate("(limit, opts) => window.DetectHelpers.getDomSummaryAdvanced(limit, opts)", 20000, {"occlusionStep": 8})
+                    dom_summary_scrolled = page.evaluate(
+                        "(p) => window.DetectHelpers.getDomSummaryAdvanced(p.limit, p.opts)",
+                        {"limit": 20000, "opts": {"occlusionStep": 8}},
+                    )
                 else:
                     dom_summary_scrolled = []
                 write_json(os.path.join(out_dir, ARTIFACTS["dom_summary_scrolled"]), {
@@ -334,19 +574,22 @@ def collect(
 
             # Persist scroll info summary
             try:
-                write_json(os.path.join(out_dir, ARTIFACTS["scroll_info"]), {
+                info_obj = {
                     "before": doc_before,
                     "after": doc_after,
                     "auto_scroll_reached_bottom": autos_reached_bottom,
                     "achieved_networkidle": achieved_networkidle,
                     "new_elements_count": new_count,
-                })
+                }
+                if container_info:
+                    info_obj["container"] = container_info
+                write_json(os.path.join(out_dir, ARTIFACTS["scroll_info"]), info_obj)
             except Exception as we:
                 warnings.append({"code": "SCROLL_INFO_WRITE_ERROR", "stage": "scroll_info", "error": str(we)})
 
             # meta.json — URL, domain, viewport, UA, tz, status, versions
             try:
-            ua = (page.evaluate("() => window.DetectHelpers.getUserAgent()") if injected_helpers else page.evaluate("() => navigator.userAgent")) or ""
+                ua = (page.evaluate("() => window.DetectHelpers.getUserAgent()") if injected_helpers else page.evaluate("() => navigator.userAgent")) or ""
             except Exception:
                 ua = ""
                 warnings.append({"code": "UA_ERROR", "stage": "meta", "error": "navigator.userAgent unavailable"})
@@ -375,6 +618,77 @@ def collect(
                 "finished_epoch": time.time(),
             }
             write_json(os.path.join(out_dir, ARTIFACTS["meta"]), meta)
+
+            # controls_tree.json — 极简控件树（默认启用）
+            try:
+                controls_out = os.path.join(out_dir, ARTIFACTS["controls_tree"])
+                elements_for_tree = None
+                # 优先从落地文件读取（解耦内存变量）
+                try:
+                    p_scrolled = os.path.join(out_dir, ARTIFACTS["dom_summary_scrolled"])
+                    if os.path.exists(p_scrolled):
+                        with open(p_scrolled, "r", encoding="utf-8") as f:
+                            doc = json.load(f)
+                            elements_for_tree = doc.get("elements")
+                except Exception:
+                    elements_for_tree = None
+                if not elements_for_tree:
+                    try:
+                        p_base = os.path.join(out_dir, ARTIFACTS["dom_summary"])
+                        if os.path.exists(p_base):
+                            with open(p_base, "r", encoding="utf-8") as f:
+                                doc = json.load(f)
+                                elements_for_tree = doc.get("elements")
+                    except Exception:
+                        elements_for_tree = None
+                # 仍不可得则回退到内存变量
+                if not elements_for_tree:
+                    elements_for_tree = dom_summary_scrolled if (isinstance(locals().get("dom_summary_scrolled"), list) and locals().get("dom_summary_scrolled")) else dom_summary
+                if not elements_for_tree:
+                    raise RuntimeError("no elements available for controls tree")
+                write_controls_tree(elements_for_tree, controls_out)
+            except Exception as ce:
+                warnings.append({"code": "CONTROLS_TREE_ERROR", "stage": "controls_tree", "error": str(ce)})
+
+            # icons/ — 基于控件 bbox 的贴图裁剪（启发式）
+            try:
+                # 以滚动后的整页图为基图（覆盖更广）
+                generate_icon_patches(
+                    out_dir,
+                    tree_file=ARTIFACTS["controls_tree"],
+                    screenshot_file=ARTIFACTS["screenshot_scrolled_tail"],
+                    icons_subdir="icons",
+                )
+                # 可选：并行生成一套基于 loaded 的贴图，便于对比（不影响主目录）
+                try:
+                    generate_icon_patches(
+                        out_dir,
+                        tree_file=ARTIFACTS["controls_tree"],
+                        screenshot_file=ARTIFACTS["screenshot_loaded"],
+                        icons_subdir="icons_loaded",
+                    )
+                except Exception:
+                    pass
+            except Exception as ie:
+                warnings.append({"code": "ICON_PATCH_ERROR", "stage": "icons", "error": str(ie)})
+
+            # 自动生成 Overlay 截图（loaded）
+            try:
+                if enable_overlay:
+                    img_in = os.path.join(out_dir, ARTIFACTS["screenshot_loaded"])
+                    tree_in = os.path.join(out_dir, ARTIFACTS["controls_tree"])
+                    img_out = os.path.join(out_dir, ARTIFACTS["screenshot_loaded_overlay"])
+                    if os.path.exists(img_in) and os.path.exists(tree_in):
+                        draw_overlay(img_in, tree_in, img_out, min_thickness=1, max_thickness=6, alpha=0, label=False)
+                    else:
+                        missing = []
+                        if not os.path.exists(img_in):
+                            missing.append("screenshot_loaded.png")
+                        if not os.path.exists(tree_in):
+                            missing.append("controls_tree.json")
+                        raise RuntimeError(f"missing inputs: {', '.join(missing)}")
+            except Exception as oe:
+                warnings.append({"code": "OVERLAY_ERROR", "stage": "overlay", "error": str(oe)})
 
     except Exception as e:
         # Fatal error occurred (e.g., launch/navigation); write failure meta.
@@ -469,7 +783,7 @@ def _cli() -> int:
     import argparse
     p = argparse.ArgumentParser(description="Collect page artifacts using Playwright.")
     p.add_argument("url", help="Target URL, e.g. https://www.baidu.com")
-    p.add_argument("--out-root", default="data", help="Output root directory (default: data)")
+    p.add_argument("--out-root", default="workspace/data", help="Output root directory (default: workspace/data)")
     p.add_argument("--timeout-ms", type=int, default=45000, help="Navigation/collection timeout in ms")
     p.add_argument("--raise-on-error", action="store_true", help="Raise CollectError on fatal errors")
     p.add_argument("--no-auto-scroll", dest="auto_scroll", action="store_false", help="Disable auto scroll before loaded screenshot")
