@@ -12,7 +12,11 @@ from datetime import datetime
 from typing import Any, Dict, Optional, Tuple, Union
 from urllib.parse import urlparse
 
-from .errors import CollectError
+# 兼容包内与脚本直接运行两种方式的导入
+try:  # pragma: no cover
+    from .errors import CollectError
+except Exception:  # pragma: no cover
+    from errors import CollectError  # type: ignore
 
 
 def sanitize_domain(url: str) -> str:
@@ -52,6 +56,20 @@ def write_json(path: str, obj: Dict[str, Any]) -> None:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
 
+def load_json_config(path: Optional[str]) -> Dict[str, Any]:
+    """加载 JSON 配置文件（若不存在或解析失败则返回空 dict）。"""
+    if not path:
+        return {}
+    try:
+        if not os.path.exists(path):
+            return {}
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
 def validate_url(url: str) -> None:
     """校验 URL（仅允许 http/https），非法则抛 CollectError。"""
     parsed = urlparse(url)
@@ -80,4 +98,3 @@ def parse_viewport(viewport: Union[str, Tuple[int, int], None]) -> Optional[Tupl
         except Exception:
             return None
     return None
-

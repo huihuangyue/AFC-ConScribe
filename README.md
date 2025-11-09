@@ -23,6 +23,7 @@
 ## 采集 Detect 使用（Python + Playwright）
 - 脚本：`detect/collect_playwright.py`
 - 运行：`python detect/collect_playwright.py https://www.example.com`
+  
 - 产物目录：`workspace/data/<domain_sanitized>/<YYYYMMDDHHMMSS>/`
 - 产物文件：
   - `screenshot_initial.png`：DOMContentLoaded 后全页截图
@@ -32,3 +33,29 @@
   - `ax.json`：可访问性树快照（AXTree）
   - `meta.json`：URL/UA/viewport/时区偏移/状态/版本
   - `timings.json`：Navigation Timing（v2 或 legacy）
+  
+- 默认滚动策略：
+- 预热滚动（默认开启）：在任何采集动作前按“等待 → 慢速下拉 → 再等待”的节奏进行预热。默认参数：
+  - `--prewarm-wait-before-ms 1200`
+  - 步进模式（默认）：`--prewarm-max-steps 3`、`--prewarm-delay-ms 1500`
+  - `--prewarm-wait-after-ms 1200`
+  - 可选改为按距离滚动：`--prewarm-scroll-ratio <0~1>` 或 `--prewarm-scroll-pixels <px>`（与步骤上限共同生效）
+  可用 `--no-prewarm` 关闭。
+- 截图前滚动：在“整页截图”前仍会再做一轮轻量自动滚动（默认 3 步、步间 1200ms），随后会重新抽取 DOM 简表并用于控件树生成，最后输出整页截图（fullPage）。可用 `--autoscroll-max-steps`、`--autoscroll-delay-ms` 调整，或 `--no-auto-scroll` 关闭。
+
+截图稳定性优化：
+- 在生成 `screenshot_initial.png` 与 `screenshot_loaded.png` 前，默认会等待 2 帧 rAF 并额外静默 200ms（`--stabilize-frames` / `--stabilize-wait-ms` 可调），以降低过渡动画和微抖动带来的偏差。
+
+资源就绪等待（默认开启）：
+- 默认会等待“视口内图片（<img>）”与“CSS 背景图（background-image）”就绪后再继续采集与截图：
+  - 图片/背景等待超时：默认 45s（可用 `--images-wait-timeout-ms` 改）
+  - 最大检查张数：`--images-max-count 256`
+- 如需关闭等待，可使用：`--no-ensure-images`、`--no-ensure-backgrounds`。
+
+容器拼接（长图）默认关闭：
+- 若页面存在内部可滚动大容器，采集可尝试“容器感知拼接”；但为避免误选小容器与接缝问题，默认关闭，始终回退为整页截图兜底（`screenshot_scrolled_tail.png`）。
+- 可通过 `--container-stitch` 显式开启；并可用 `--max-stitch-seconds`/`--max-stitch-segments`/`--max-stitch-pixels` 控制拼接预算。
+- 长图裁剪与清理（默认开启）：
+  - 依据控件/内容最大 bottom + 边距，以及自底向上“方差扫描”清理尾部空白/未加载块，输出裁剪版：
+    - `screenshot_loaded_cropped.png`、`screenshot_loaded_cropped_overlay.png`
+  - 裁剪上限：最多保留 4 屏（可在配置中调 `crop_max_screens`）

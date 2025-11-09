@@ -4,10 +4,11 @@ detect.controls_tree
 
 节点字段：
 - id: 以 DOM 索引为后缀（如 d45）
-- parent: 父控件 id（无则为 null）
-- children: 子控件 id 列表
+- type: control|content（交互控件或内容卡片）
+- parent: 父节点 id（无则为 null）
+- children: 子节点 id 列表
 - selector: 简易 CSS 选择器（稳定优先，不保证唯一）
-- geom: { bbox: [x,y,w,h], shape: rect|pill|round }
+- geom: { bbox: [x,y,w,h], shape: rect|pill|round[, page_bbox] }
 """
 
 from __future__ import annotations
@@ -23,6 +24,9 @@ except Exception:  # pragma: no cover
 
 CONTROL_TAGS = {"button", "input", "select", "textarea", "a"}
 CONTROL_ROLES = {"button", "link", "textbox", "checkbox", "radio", "combobox"}
+CONTENT_TAGS = {"article", "figure", "section", "li"}
+CONTENT_ROLES = {"article", "listitem", "feed", "region", "group"}
+_MIN_CONTENT_AREA = 20000  # 放宽面积阈值（约 142x142 或 250x80 以上）
 
 
 def _is_control(e: Dict[str, Any]) -> bool:
@@ -40,6 +44,42 @@ def _is_control(e: Dict[str, Any]) -> bool:
     if "btn" in cls:
         return True
     return False
+
+
+def _is_content(e: Dict[str, Any]) -> bool:
+    """内容卡片/列表项的启发式。"""
+    role = (e.get("role") or "").lower()
+    if role in CONTENT_ROLES:
+        return True
+    tag = (e.get("tag") or "").lower()
+    if tag in CONTENT_TAGS:
+        return True
+    cls = (e.get("class") or "").lower()
+    for kw in ("card", "tile", "list-item", "listitem", "grid-item", "grid", "cell", "module", "result", "story", "news", "panel", "item", "block", "feed-card"):
+        if kw in cls:
+            return True
+    return False
+
+
+def _is_content_by_area(e: Dict[str, Any]) -> bool:
+    """面积/尺寸兜底：较大的可见块视为内容卡片，过滤根容器。"""
+    tag = (e.get("tag") or "").lower()
+    if tag in {"html", "body"}:
+        return False
+    role = (e.get("role") or "").lower()
+    if role in {"main", "application"}:
+        return False
+    bbox = e.get("bbox") or [0, 0, 0, 0]
+    try:
+        w = int(bbox[2] or 0)
+        h = int(bbox[3] or 0)
+    except Exception:
+        return False
+    if w < 96 or h < 80:
+        return False
+    if w * h < _MIN_CONTENT_AREA:
+        return False
+    return True
 
 
 def _shape_from_radius(bbox: List[int], border_radius: Optional[float]) -> str:
@@ -100,9 +140,10 @@ def _build_selector(e: Dict[str, Any]) -> str:
 
 
 def build_controls_tree(elements: List[Dict[str, Any]]) -> Dict[str, Any]:
-    # 仅保留可见且 bbox>0 的控件候选
+    # 仅保留可见且 bbox>0 的候选（控件 + 内容）
     by_idx: Dict[int, Dict[str, Any]] = {}
-    controls: Dict[int, Dict[str, Any]] = {}
+    candidates: Dict[int, Dict[str, Any]] = {}
+    kinds: Dict[int, str] = {}
     for e in elements:
         try:
             idx = int(e.get("index"))
@@ -116,14 +157,18 @@ def build_controls_tree(elements: List[Dict[str, Any]]) -> Dict[str, Any]:
         if (bbox[2] or 0) <= 0 or (bbox[3] or 0) <= 0:
             continue
         if _is_control(e):
-            controls[idx] = e
+            candidates[idx] = e
+            kinds[idx] = "control"
+        elif _is_content(e) or _is_content_by_area(e):
+            candidates[idx] = e
+            kinds[idx] = "content"
 
     # 父子关系：最近的控件祖先
     parent_for: Dict[int, Optional[int]] = {}
-    for idx, e in controls.items():
+    for idx, e in candidates.items():
         p = e.get("parent_index")
         while p is not None:
-            if p in controls:
+            if p in candidates:
                 parent_for[idx] = p
                 break
             pe = by_idx.get(int(p)) if p is not None else None
@@ -138,9 +183,14 @@ def build_controls_tree(elements: List[Dict[str, Any]]) -> Dict[str, Any]:
     for idx, p in parent_for.items():
         children_map.setdefault(p, []).append(idx)
 
-    # 构造节点
+    # 构造节点（对于内容类，仅保留“叶子”候选，避免大容器打框）
     nodes: List[Dict[str, Any]] = []
-    for idx, e in controls.items():
+    for idx, e in candidates.items():
+        k = kinds.get(idx, "control")
+        if k == "content":
+            chs = children_map.get(idx, [])
+            if any((c in candidates) for c in chs):
+                continue
         nid = f"d{idx}"
         pid_idx = parent_for.get(idx)
         pid = f"d{pid_idx}" if pid_idx is not None else None
@@ -150,17 +200,23 @@ def build_controls_tree(elements: List[Dict[str, Any]]) -> Dict[str, Any]:
         children_ids = [f"d{i}" for i in children_map.get(idx, [])]
         nodes.append({
             "id": nid,
+            "type": k,
             "parent": pid,
             "children": children_ids,
             "selector": selector,
-            "geom": {"bbox": bbox, "shape": shape},
+            "geom": {"bbox": bbox, "shape": shape, **({"page_bbox": (e.get("page_bbox") or None)} if e.get("page_bbox") is not None else {})},
         })
+
+    ctrl_cnt = sum(1 for n in nodes if n.get("type") == "control")
+    cont_cnt = sum(1 for n in nodes if n.get("type") == "content")
 
     return {
         "meta": {
             "source": "dom+ax?",  # 若后续融合 AX，可在上游完善
             "rule_version": "r1.0.0",
             "count": len(nodes),
+            "control_count": ctrl_cnt,
+            "content_count": cont_cnt,
         },
         "nodes": nodes,
     }
@@ -169,4 +225,3 @@ def build_controls_tree(elements: List[Dict[str, Any]]) -> Dict[str, Any]:
 def write_controls_tree(elements: List[Dict[str, Any]], out_path: str) -> None:
     tree = build_controls_tree(elements)
     write_json(out_path, tree)
-

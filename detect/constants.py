@@ -10,8 +10,11 @@ DETECT_SPEC_VERSION = "v0.1"
 ARTIFACTS = {
     "screenshot_initial": "screenshot_initial.png",
     "screenshot_loaded": "screenshot_loaded.png",
+    "screenshot_loaded_cropped": "screenshot_loaded_cropped.png",
+    "screenshot_loaded_cropped_overlay": "screenshot_loaded_cropped_overlay.png",
     "screenshot_loaded_overlay": "screenshot_loaded_overlay.png",
     "screenshot_scrolled_tail": "screenshot_scrolled_tail.png",
+    "screenshot_scrolled_tail_overlay": "screenshot_scrolled_tail_overlay.png",
     "dom_html": "dom.html",
     "dom_summary": "dom_summary.json",
     "dom_summary_scrolled": "dom_summary_scrolled.json",

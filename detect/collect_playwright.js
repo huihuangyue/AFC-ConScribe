@@ -95,6 +95,12 @@
         name: e.getAttribute('name') || null,
         aria,
         bbox: [toInt(r.x), toInt(r.y), toInt(r.width), toInt(r.height)],
+        page_bbox: [
+          toInt(r.x + (window.scrollX || window.pageXOffset || 0)),
+          toInt(r.y + (window.scrollY || window.pageYOffset || 0)),
+          toInt(r.width),
+          toInt(r.height)
+        ],
         visible,
         text: clamp(e.innerText)
       });
@@ -158,6 +164,12 @@
         name: e.getAttribute('name') || null,
         aria,
         bbox: [toInt(r.x), toInt(r.y), toInt(r.width), toInt(r.height)],
+        page_bbox: [
+          toInt(r.x + (window.scrollX || window.pageXOffset || 0)),
+          toInt(r.y + (window.scrollY || window.pageYOffset || 0)),
+          toInt(r.width),
+          toInt(r.height)
+        ],
         visible: basicVisible,
         visible_adv: advVisible,
         in_viewport: inViewport,
@@ -198,6 +210,78 @@
 
   function getUserAgent() {
     return navigator.userAgent || '';
+  }
+
+  // ===== 背景图（CSS background-image）就绪检测与预加载 =====
+  function parseCssUrls(bg) {
+    if (!bg) return [];
+    // 支持多个背景：url("...") , url('...') , url(...)，过滤非 url()（如渐变）
+    const urls = [];
+    const re = /url\((?:\"([^\"]+)\"|'([^']+)'|([^\)]+))\)/g;
+    let m;
+    while ((m = re.exec(bg)) !== null) {
+      const u = (m[1] || m[2] || m[3] || '').trim();
+      if (u && !u.startsWith('data:')) urls.push(u);
+    }
+    return urls;
+  }
+
+  function getVisibleBackgroundImageUrls(limit = 64) {
+    const vw = Math.max(document.documentElement?.clientWidth || 0, window.innerWidth || 0);
+    const vh = Math.max(document.documentElement?.clientHeight || 0, window.innerHeight || 0);
+    const nodes = Array.from(document.querySelectorAll('*'));
+    const urls = [];
+    const seen = new Set();
+    for (let i = 0; i < nodes.length && urls.length < limit; i++) {
+      const e = nodes[i];
+      const r = e.getBoundingClientRect();
+      if (!(r.width > 0 && r.height > 0)) continue;
+      if (!(r.bottom > 0 && r.right > 0 && r.top < vh && r.left < vw)) continue;
+      const cs = getComputedStyle(e);
+      const bg = cs.backgroundImage || '';
+      if (!bg || bg === 'none') continue;
+      for (const u of parseCssUrls(bg)) {
+        if (!seen.has(u)) { seen.add(u); urls.push(u); }
+        if (urls.length >= limit) break;
+      }
+    }
+    for (const el of [document.body, document.documentElement]) {
+      if (!el) continue;
+      const cs = getComputedStyle(el);
+      const bg = cs.backgroundImage || '';
+      for (const u of parseCssUrls(bg)) { if (!seen.has(u)) { seen.add(u); urls.push(u); } }
+    }
+    return urls;
+  }
+
+  function preloadImage(url) {
+    return new Promise((resolve) => {
+      try {
+        const img = new Image();
+        img.onload = () => resolve(true);
+        img.onerror = () => resolve(false);
+        try { if (img.decode) img.decode().catch(()=>{}); } catch(_) {}
+        img.src = url;
+      } catch (_) {
+        resolve(false);
+      }
+    });
+  }
+
+  async function waitViewportBackgrounds(limit = 64, timeoutMs = 10000) {
+    const urls = getVisibleBackgroundImageUrls(limit);
+    if (!urls.length) return true;
+    const to = Math.max(1, Number(timeoutMs) || 1);
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; }, to);
+    try {
+      await Promise.all(urls.map(u => preloadImage(u)));
+    } catch (_) {
+      // ignore
+    } finally {
+      clearTimeout(timer);
+    }
+    return !timedOut || true;
   }
 
   function scrollStep() {
@@ -248,7 +332,11 @@
       if (sh <= ch + 50) continue;
       const rect = e.getBoundingClientRect();
       if (rect.width <= 0 || rect.height <= 0) continue;
-      const sizeScore = Math.min(rect.height / (window.innerHeight || 1), 1);
+      // 仅考虑接近“主视口”的容器：宽/高需覆盖视口的大部分，避免误选水平条、卡片滑动容器等
+      const vw = Math.max(document.documentElement?.clientWidth || 0, window.innerWidth || 0);
+      const vh = Math.max(document.documentElement?.clientHeight || 0, window.innerHeight || 0);
+      if (rect.width < vw * 0.7 || rect.height < vh * 0.6) continue;
+      const sizeScore = Math.min(rect.height / (vh || 1), 1);
       const score = sh * (1 + 0.1 * sizeScore);
       if (score > bestScore) {
         bestScore = score;
@@ -283,6 +371,8 @@
     getNavigationTiming,
     getDocMetrics,
     getUserAgent,
+    getVisibleBackgroundImageUrls,
+    waitViewportBackgrounds,
     scrollStep,
     // container-aware helpers
     findMainScrollContainer,

@@ -145,13 +145,15 @@ workspace/data/
 - 目的：提取“可操作控件”的轻量结构树，便于自动化/检索。
 - 节点字段：
   - `id`: 节点 id（如 `d45`，源自 DOM 索引）
+  - `type`: `control|content`（交互控件或内容卡片/列表项）
   - `parent`: 父节点 id（根为 null）
-  - `children`: 子节点 id 列表（仅控件间的父子）
+  - `children`: 子节点 id 列表（节点间的父子）
   - `selector`: 简易 CSS 选择器（稳定优先，可能非唯一）
-  - `geom`: `{ bbox: [x,y,w,h], shape: rect|pill|round }`
+  - `geom`: `{ bbox: [x,y,w,h], shape: rect|pill|round[, page_bbox] }`
 - 来源：默认使用 `dom_summary_scrolled.json.elements`（若为空退回 `dom_summary.json.elements`），由 `detect/controls_tree.py` 生成。
 - 规则摘要：
   - 控件判定：标签/角色/交互分等启发式（button/input/select/textarea/a；role=button/link/textbox 等）
+  - 内容判定：role=article/listitem/feed/region、tag=article，或 class 含 card/tile/list-item/grid-item/cell 等关键词
   - 父子关系：按最近的控件祖先（跳过纯容器）
 - 形状：基于 `border-radius` 与 bbox 近似判定 rect/pill/round
 
