@@ -113,6 +113,11 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     ap.add_argument("--highlight-skill-primary", action="store_true", help="Highlight skill's primary selector before invocation")
     ap.add_argument("--highlight-color", default="rgba(255,0,0,0.9)", help="Highlight outline color (default: rgba(255,0,0,0.9))")
     ap.add_argument("--highlight-width-px", type=int, default=2, help="Highlight outline width in px (default: 2)")
+    # Click flash options
+    ap.add_argument("--flash-clicks", action="store_true", help="Temporarily fill clicked element for visibility")
+    ap.add_argument("--flash-color", default="rgba(255,215,0,0.5)", help="Fill color for click flash (default: rgba(255,215,0,0.5))")
+    ap.add_argument("--flash-duration-ms", type=int, default=1000, help="Duration of click flash in ms (default: 1000)")
+    ap.add_argument("--flash-mode", default="background", choices=["background", "outline"], help="Flash mode: background or outline")
     ap.set_defaults(keep_open=True)
     return ap.parse_args(argv)
 
@@ -172,6 +177,12 @@ def main(argv: Optional[list[str]] = None) -> int:
                 primary = str((locators or {}).get("selector") or "")
                 if primary:
                     env.highlight(primary, color=str(args.highlight_color or "rgba(255,0,0,0.9)"), width=int(args.highlight_width_px or 2))
+        except Exception:
+            pass
+        # Optional: enable click flash
+        try:
+            if getattr(args, "flash_clicks", False):
+                env.enable_click_flash(color=str(args.flash_color or "rgba(255,215,0,0.5)"), duration_ms=int(args.flash_duration_ms or 1000), mode=str(args.flash_mode or "background"))
         except Exception:
             pass
         call_str = args.invoke

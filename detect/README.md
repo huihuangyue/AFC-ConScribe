@@ -181,10 +181,22 @@ workspace/data/
 - 手动运行（可自定义参数）：
   - `python detect/overlay.py --dir data/baidu_com/20251116171811 --image screenshot_loaded.png --label`
   - 输出：`data/baidu_com/20251116171811/screenshot_loaded_overlay.png`
-- 参数：
-  - `--min-thickness`/`--max-thickness`：线宽范围（默认 1~6，靠近根的节点线更粗）
-  - `--alpha`：填充透明度 0~255（默认 0 即不填充；建议 0~128）
-  - `--label`：是否在框左上角绘制节点 id
+- 参数（关键项）：
+  - `--mode {viewport,page}`：叠加模式。viewport 仅使用节点的视口坐标 `bbox` 并限制在视口高度；page 使用“容器拼接映射/页面绝对坐标”，适合整页大图。
+  - `--min-thickness`/`--max-thickness`：线宽范围（默认 1~6，靠近根的节点线更粗）。
+  - `--alpha`：填充透明度 0~255（默认 0 即不填充；建议 0~128）。
+  - `--label`：是否在框左上角绘制节点 id。
+  - 可见性/遮挡筛选：默认关闭（不丢框）。如需过滤，可加 `--filter-occluded [--occ-threshold 0.98]` 或 `--no-only-visible/--no-filter-occluded` 显式控制。
+
+> 对齐策略与默认值：为避免错位，采集器在自动生成 overlay 时，默认使用 page 模式（`--mode page`），并且不进行“可见性/遮挡”过滤，以保证“不错失框”。
+
+#### 与采集器参数的联动
+
+- `detect/collect_playwright.py` 提供 Overlay 生成模式选择：
+  - `--overlay-mode-loaded {auto|page|viewport}`：控制 `screenshot_loaded*.png` 的叠加模式；
+  - `--overlay-mode-tail {auto|page|viewport}`：控制 `screenshot_scrolled_tail.png` 的叠加模式；
+  - `auto` 行为：按当前实现默认选择 `page`，以降低整页/拼接图的错位概率。
+  - 采集器在生成 overlay 时固定使用 `only_visible=False`, `filter_occluded=False`（即不过滤），若需筛选请单独调用 `detect/overlay.py`。
 
 ### 模块化与解耦
 

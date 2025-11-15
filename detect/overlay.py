@@ -94,10 +94,13 @@ def _project_bbox_to_stitched(bbox: List[int], mapping: Dict[str, Any], *, stitc
         return []
 
 
-def _load_summary_lookup(base_dir: str) -> Dict[str, Dict[str, List[int]]]:
-    """读取 dom_summary_scrolled.json 或 dom_summary.json，构建 id→{bbox,page_bbox} 映射。
+def _load_summary_lookup(base_dir: str) -> Dict[str, Dict[str, Any]]:
+    """读取 dom_summary_scrolled.json 或 dom_summary.json，构建 id→部分字段映射。
 
-    返回形如 { 'd123': { 'bbox': [...], 'page_bbox': [...] }, ... }
+    返回形如:
+      { 'd123': { 'bbox': [...], 'page_bbox': [...], 'visible': bool,
+                  'visible_adv': bool|None, 'in_viewport': bool|None,
+                  'occlusion_ratio': float|None } }
     读取失败或缺失时返回空映射。
     """
     import json as _json
@@ -112,7 +115,7 @@ def _load_summary_lookup(base_dir: str) -> Dict[str, Dict[str, List[int]]]:
             with open(p, 'r', encoding='utf-8') as f:
                 doc = _json.load(f)
             els = doc.get('elements') or []
-            out: Dict[str, Dict[str, List[int]]] = {}
+            out: Dict[str, Dict[str, Any]] = {}
             for e in els:
                 try:
                     idx = int(e.get('index'))
@@ -121,7 +124,14 @@ def _load_summary_lookup(base_dir: str) -> Dict[str, Dict[str, List[int]]]:
                 nid = f'd{idx}'
                 bb = e.get('bbox') or [0, 0, 0, 0]
                 pbb = e.get('page_bbox') or [0, 0, 0, 0]
-                out[nid] = {'bbox': bb, 'page_bbox': pbb}
+                out[nid] = {
+                    'bbox': bb,
+                    'page_bbox': pbb,
+                    'visible': bool(e.get('visible')) if e.get('visible') is not None else None,
+                    'visible_adv': e.get('visible_adv'),
+                    'in_viewport': e.get('in_viewport'),
+                    'occlusion_ratio': e.get('occlusion_ratio'),
+                }
             if out:
                 return out
         except Exception:
@@ -185,6 +195,21 @@ def _map_thickness(depth: int, max_depth: int, min_t: int, max_t: int) -> int:
     return max(min_t, min(max_t, t))
 
 
+def _read_viewport_height(base_dir: str, fallback: int = 800) -> int:
+    """读取 meta.json 中的 viewport.height，失败则回退 fallback。"""
+    try:
+        import json as _json
+        p = os.path.join(base_dir, 'meta.json')
+        if os.path.exists(p):
+            with open(p, 'r', encoding='utf-8') as f:
+                meta = _json.load(f)
+            vh = int(((meta.get('viewport') or {}).get('height')) or fallback)
+            return max(1, vh)
+    except Exception:
+        pass
+    return max(1, int(fallback))
+
+
 def draw_overlay(
     image_path: str,
     tree_path: str,
@@ -194,6 +219,10 @@ def draw_overlay(
     max_thickness: int = 6,
     alpha: int = 0,
     label: bool = False,
+    mode: str = "viewport",  # viewport: 仅按 bbox 且限制在视口高度；page: 使用容器映射/页面绝对坐标
+    only_visible: bool = False,
+    filter_occluded: bool = True,
+    occlusion_threshold: float = 0.98,
 ) -> None:
     """在 image_path 上绘制控件框，输出至 out_path。
 
@@ -213,41 +242,80 @@ def draw_overlay(
     draw = ImageDraw.Draw(overlay)
     font = ImageFont.load_default()
 
-    # 若该图为容器拼接图，尝试加载映射实现坐标转换
+    # 运行模式：
+    # - viewport：忽略容器映射与 page_bbox，仅用 bbox，并限制在视口高度内；
+    # - page：保留原逻辑（容器映射优先，其次 page_bbox 回退）。
     base_dir = os.path.dirname(image_path)
-    seg_map = _try_load_segments_map(base_dir, *img.size)
-    # 为整页 Overlay 提供离线回填坐标（避免旧数据 page_bbox 缺失）
-    summary_map = _load_summary_lookup(base_dir) if not seg_map else {}
+    use_page_mode = str(mode or "viewport").lower() == "page"
+    seg_map = _try_load_segments_map(base_dir, *img.size) if use_page_mode else None
+    summary_map = _load_summary_lookup(base_dir) if (use_page_mode or (not use_page_mode)) else {}
+    viewport_h = _read_viewport_height(base_dir, fallback=img.size[1]) if not use_page_mode else None
+    viewport_h_page = _read_viewport_height(base_dir, fallback=img.size[1]) if use_page_mode else None
 
     for n in nodes:
         nid = n.get("id")
         g = n.get("geom", {})
         bbox = g.get("bbox") or [0, 0, 0, 0]
         page_bbox = g.get("page_bbox") or None
+        # 可见性筛选：若开启，按 visible/visible_adv 过滤
+        if only_visible and summary_map:
+            sm = summary_map.get(str(nid)) or {}
+            vis = sm.get('visible_adv') if sm.get('visible_adv') is not None else sm.get('visible')
+            if vis is False:
+                continue
+        # 遮挡筛选：若开启，按 occlusion_ratio 过滤（高度遮挡的元素不绘制）
+        if filter_occluded and summary_map:
+            sm2 = summary_map.get(str(nid)) or {}
+            try:
+                occ = float(sm2.get('occlusion_ratio') or 0.0)
+                if occ >= float(occlusion_threshold):
+                    continue
+            except Exception:
+                pass
         rects: List[List[int]]
-        if seg_map:
-            # 容器拼接：使用视口坐标 bbox + 映射
-            rects = _project_bbox_to_stitched(bbox, seg_map, stitched_w=img.size[0], stitched_h=img.size[1])
+        if use_page_mode:
+            if seg_map:
+                rects = _project_bbox_to_stitched(bbox, seg_map, stitched_w=img.size[0], stitched_h=img.size[1])
+            else:
+                # 普通整页：优先使用 page_bbox（绝对坐标），若其无效则退回视口坐标/summary 回填
+                x, y, w, h = bbox
+                if page_bbox and all(isinstance(v, (int, float)) for v in page_bbox):
+                    px, py, pw, ph = [int(v) for v in page_bbox]
+                    if pw > 0 and ph > 0:
+                        x, y, w, h = px, py, pw, ph
+                if (w <= 0 or h <= 0) and summary_map:
+                    sid = str(nid)
+                    if sid in summary_map:
+                        pbb = summary_map[sid].get('page_bbox') or [0, 0, 0, 0]
+                        pbw, pbh = int(pbb[2] or 0), int(pbb[3] or 0)
+                        if pbw > 0 and pbh > 0:
+                            x, y, w, h = int(pbb[0] or 0), int(pbb[1] or 0), pbw, pbh
+                        else:
+                            bb2 = summary_map[sid].get('bbox') or [0, 0, 0, 0]
+                            if int(bb2[2] or 0) > 0 and int(bb2[3] or 0) > 0:
+                                x, y, w, h = int(bb2[0] or 0), int(bb2[1] or 0), int(bb2[2] or 0), int(bb2[3] or 0)
+                # 额外兜底：fixed/sticky 元素在滚动时的 page_bbox 可能被叠加 scrollY，导致 y 过大。
+                # 若其视口内的 bbox.y 很小（靠近顶部）而 page_bbox.y>>viewport 高度，则将 y 调整为 bbox.y。
+                try:
+                    if viewport_h_page and y > int(viewport_h_page * 1.5):
+                        by = int(bbox[1] or 0)
+                        if 0 <= by <= int(viewport_h_page * 0.25) and h <= int(viewport_h_page * 0.8):
+                            y = by
+                except Exception:
+                    pass
+                # 裁剪到画布范围
+                x = max(0, min(int(x), img.size[0]))
+                y = max(0, min(int(y), img.size[1]))
+                w = max(0, min(int(w), img.size[0] - x))
+                h = max(0, min(int(h), img.size[1] - y))
+                rects = [[x, y, w, h]] if (w > 0 and h > 0) else []
         else:
-            # 普通整页：优先使用 page_bbox（绝对坐标），若其无效则退回视口坐标
-            x, y, w, h = bbox
-            if page_bbox and all(isinstance(v, (int, float)) for v in page_bbox):
-                px, py, pw, ph = [int(v) for v in page_bbox]
-                if pw > 0 and ph > 0:
-                    x, y, w, h = px, py, pw, ph
-            # 进一步：若 controls_tree 中 page_bbox 无效，尝试从 dom_summary_* 回填
-            if (w <= 0 or h <= 0) and summary_map:
-                sid = str(nid)
-                if sid in summary_map:
-                    pbb = summary_map[sid].get('page_bbox') or [0, 0, 0, 0]
-                    pbw, pbh = int(pbb[2] or 0), int(pbb[3] or 0)
-                    if pbw > 0 and pbh > 0:
-                        x, y, w, h = int(pbb[0] or 0), int(pbb[1] or 0), pbw, pbh
-                    else:
-                        bb2 = summary_map[sid].get('bbox') or [0, 0, 0, 0]
-                        if int(bb2[2] or 0) > 0 and int(bb2[3] or 0) > 0:
-                            x, y, w, h = int(bb2[0] or 0), int(bb2[1] or 0), int(bb2[2] or 0), int(bb2[3] or 0)
-            rects = [[x, y, w, h]] if (w > 0 and h > 0) else []
+            # 视口模式：仅用 bbox，并限制在视口高度内（避免全页坐标错位）
+            x, y, w, h = [int(v or 0) for v in (bbox or [0, 0, 0, 0])]
+            if viewport_h is not None and (y >= viewport_h or y + h <= 0):
+                rects = []
+            else:
+                rects = [[x, y, w, h]] if (w > 0 and h > 0) else []
 
         if not rects:
             continue
@@ -283,10 +351,16 @@ def _cli() -> int:
     p.add_argument("--image", default="screenshot_loaded.png", help="输入截图文件名")
     p.add_argument("--tree", default="controls_tree.json", help="控件树文件名")
     p.add_argument("--out", default=None, help="输出文件名（默认在输入名后加 _overlay.png）")
+    p.add_argument("--mode", choices=["viewport", "page"], default="viewport", help="叠加模式：viewport=仅按视口 bbox 且限制视口高度；page=使用容器映射/页面坐标（可能轻微错位）")
     p.add_argument("--min-thickness", type=int, default=1)
     p.add_argument("--max-thickness", type=int, default=6)
     p.add_argument("--alpha", type=int, default=0, help="填充透明度 0~255，建议 0~128")
     p.add_argument("--label", action="store_true", help="是否绘制节点 id 标签")
+    p.add_argument("--no-only-visible", dest="only_visible", action="store_false", help="关闭可见性筛选（默认关闭，仅按遮挡过滤）")
+    p.add_argument("--no-filter-occluded", dest="filter_occluded", action="store_false", help="关闭遮挡筛选（默认关闭）")
+    p.add_argument("--filter-occluded", dest="filter_occluded", action="store_true", help="开启遮挡筛选")
+    p.add_argument("--occ-threshold", type=float, default=0.98, help="遮挡阈值，>=该值视为被挡住（启用遮挡筛选时生效）")
+    p.set_defaults(only_visible=False, filter_occluded=False)
     args = p.parse_args()
 
     image_path = os.path.join(args.dir, args.image)
@@ -301,6 +375,10 @@ def _cli() -> int:
         max_thickness=args.max_thickness,
         alpha=args.alpha,
         label=args.label,
+        mode=args.mode,
+        only_visible=args.only_visible,
+        filter_occluded=args.filter_occluded,
+        occlusion_threshold=float(args.occ_threshold),
     )
     print(out_path)
     return 0

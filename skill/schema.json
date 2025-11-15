@@ -1,0 +1,208 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://conscribe.ai/schemas/skill.schema.json",
+  "title": "ConScribe Skill Schema (v1)",
+  "description": "Schema for skill entries: S = (Preconditions, Program).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9_-]{1,64}$",
+      "description": "Unique skill id; suggest d<dom_index> or d<dom_index>-<ts>."
+    },
+    "domain": { "type": "string", "minLength": 1 },
+    "slug": { "type": "string", "pattern": "^[a-z0-9_]{1,32}$" },
+    "label": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "action": {
+      "type": "string",
+      "enum": ["click", "type", "select", "toggle", "navigate", "submit", "open"]
+    },
+    "preconditions": { "$ref": "#/$defs/preconditions" },
+    "locators": { "$ref": "#/$defs/locators" },
+    "args_schema": {
+      "type": ["object"],
+      "description": "JSON Schema for program args (keep minimal)."
+    },
+    "program": { "$ref": "#/$defs/program" },
+    "prepare": { "$ref": "#/$defs/prepare" },
+    "evidence": { "$ref": "#/$defs/evidence" },
+    "meta": { "$ref": "#/$defs/meta" },
+    "health": { "$ref": "#/$defs/health" }
+  },
+  "required": [
+    "id",
+    "domain",
+    "action",
+    "preconditions",
+    "locators",
+    "program",
+    "meta"
+  ],
+  "$defs": {
+    "bbox": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "prefixItems": [
+        { "type": "integer" },
+        { "type": "integer" },
+        { "type": "integer", "minimum": 1 },
+        { "type": "integer", "minimum": 1 }
+      ],
+      "items": false,
+      "description": "[x,y,w,h]; w/h must be >=1."
+    },
+    "preconditions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "url_matches": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1,
+          "description": "List of URL regex patterns; include at least a domain-level rule."
+        },
+        "exists": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1,
+          "description": "CSS selectors that must exist before execution."
+        },
+        "not_exists": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Blocking/overlay selectors that should not exist."
+        },
+        "viewport": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "min_width": { "type": "integer", "minimum": 0 },
+            "min_height": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "visible": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Selectors that should be visible (optional)."
+        },
+        "enabled": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Selectors that should be enabled (optional)."
+        },
+        "text_contains": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "description": "Stable text snippets required to appear (optional)."
+        },
+        "login_state": { "type": "string" },
+        "cookies": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "required": ["url_matches", "exists"]
+    },
+    "locators": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "selector": { "type": "string", "minLength": 1 },
+        "selector_alt": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "maxItems": 3
+        },
+        "by_role": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "role": { "type": "string", "minLength": 1 },
+            "name": { "type": "string" },
+            "exact": { "type": "boolean" }
+          },
+          "required": ["role"]
+        },
+        "by_text": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "maxItems": 5
+        },
+        "by_dom_index": { "type": "integer", "minimum": 0 },
+        "bbox": { "$ref": "#/$defs/bbox" },
+        "page_bbox": { "$ref": "#/$defs/bbox" }
+      },
+      "required": ["selector"]
+    },
+    "program": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "language": { "type": "string", "const": "python" },
+        "entry": { "type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$" },
+        "code": { "type": "string", "minLength": 1 },
+        "notes": { "type": "string" }
+      },
+      "required": ["language", "entry", "code"]
+    },
+    "prepare": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "language": { "type": "string", "const": "python" },
+        "entry": { "type": "string", "const": "prepare" },
+        "code": { "type": "string", "minLength": 1 }
+      },
+      "required": ["language", "entry", "code"]
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tag": { "type": "string" },
+        "role": { "type": "string" },
+        "name": { "type": "string" },
+        "text_snippets": {
+          "type": "array",
+          "items": { "type": "string" },
+          "maxItems": 5
+        },
+        "from": { "type": "string" }
+      }
+    },
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": { "type": "string" },
+        "schema_version": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" },
+        "source_dir": { "type": "string" },
+        "source_files": {
+          "type": "array",
+          "items": { "type": "string" },
+          "maxItems": 32
+        },
+        "detect_spec_version": { "type": "string" },
+        "generator": { "type": "string", "enum": ["template", "LLM", "hybrid"] }
+      },
+      "required": ["created_at"]
+    },
+    "health": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "health_score": { "type": "number", "minimum": 0, "maximum": 1 },
+        "success_count": { "type": "integer", "minimum": 0 },
+        "failure_count": { "type": "integer", "minimum": 0 },
+        "last_success_at": { "type": "string", "format": "date-time" },
+        "last_failure_at": { "type": "string", "format": "date-time" },
+        "notes": { "type": "string" }
+      }
+    }
+  }
+}
+

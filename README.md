@@ -59,3 +59,10 @@
   - 依据控件/内容最大 bottom + 边距，以及自底向上“方差扫描”清理尾部空白/未加载块，输出裁剪版：
     - `screenshot_loaded_cropped.png`、`screenshot_loaded_cropped_overlay.png`
   - 裁剪上限：最多保留 4 屏（可在配置中调 `crop_max_screens`）
+python -m skill.select --run-dir "/mnt/f/paperwork/AFC-ConScribe/workspace/data/ctrip_com/20251116032614" --top-k 999 | while read -r sel; do python -m skill.generate --run-dir "/mnt/f/paperwork/AFC-ConScribe/workspace/data/ctrip_com/20251116032614" --selector "$sel" --with-codegen; done
+python -m browser.invoke --skill "/mnt/f/paperwork/AFC-ConScribe/workspace/data/ctrip_com/20251112150152/new_skill/Skill_kakxi_d321.json" --invoke $'search_hotel(\npage,\ndestination="上海",\ncheckin_year=2025, checkin_month=12, checkin_day=17,\ncheckout_year=2025, checkout_month=12, checkout_day=25,\nrooms=1, adults=2, children=4,\nstar_ratings=["五星（钻）"],\nkeyword="外滩"\n)' --slow-mo-ms 150 --keep-open（运行）
+python -m browser.invoke --skill "/mnt/f/paperwork/AFC-ConScribe/workspace/data/ctrip_com/20251112150152/old_skill/Skill_kakxi_d321.json" --invoke $'perform_hotel_search(\n page,\n destination="上海",\n check_in_date=datetime(2025,11,12),\n check_out_date=datetime(2025,11,13),\n rooms=2,\n adults=3,\n star_level="四星"\n)' --slow-mo-ms 150 --default-timeout-ms 12000 --keep-open
+python -m skill.build --run-dir /mnt/f/paperwork/AFC-ConScribe/workspace/data/ctrip_com/20251112014916 --out /mnt/f/paperwork/AFC-ConScribe/workspace/data/ctrip_com/20251112014916/new_skill
+
+REPAIR_USE_LLM=1 python -m aid.repair --skill "/mnt/f/paperwork/AFC-ConScribe/workspace/data/ctrip_com/20251112014916/skill/Skill_kakxi_d321.json" --new-run-dir "/mnt/f/paperwork/AFC-ConScribe/workspace/data/ctrip_com/20251112143400" --old-run-dir "/mnt/f/paperwork/AFC-ConScribe/workspace/data/ctrip_com/20251112014916" --out "/mnt/f/paperwork/AFC-ConScribe/workspace/data/ctrip_com/20251112143400/repair_skill/Skill_kakxi_d321_repaired.json" --log-dir "/mnt/f/paperwork/AFC-ConScribe/workspace/data/ctrip_com/20251112143400/repair_skill/_logs" --use-llm-locators --use-llm-preconditions --use-llm-program --use-llm-naming
+

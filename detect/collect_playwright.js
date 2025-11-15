@@ -79,12 +79,17 @@
     const clamp = (s, n = 160) => (s || '').slice(0, n);
     for (let i = 0; i < nodes.length; i++) {
       const e = nodes[i];
-      const r = e.getBoundingClientRect();
+      if (!e || typeof e.getBoundingClientRect !== 'function') continue;
+      const r = e.getBoundingClientRect && e.getBoundingClientRect();
+      if (!r || typeof r.width === 'undefined' || typeof r.height === 'undefined') continue;
       const cs = getComputedStyle(e);
       const aria = {};
-      for (const attr of e.getAttributeNames()) {
-        if (attr.startsWith('aria-')) aria[attr] = e.getAttribute(attr);
-      }
+      try {
+        const attrs = (typeof e.getAttributeNames === 'function') ? e.getAttributeNames() : [];
+        for (const attr of attrs) {
+          if (attr && attr.startsWith('aria-')) aria[attr] = e.getAttribute(attr);
+        }
+      } catch (_) {}
       const visible = (r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none');
       result.push({
         index: i,
@@ -131,12 +136,17 @@
     };
     for (let i = 0; i < nodes.length; i++) {
       const e = nodes[i];
-      const r = e.getBoundingClientRect();
+      if (!e || typeof e.getBoundingClientRect !== 'function') continue;
+      const r = e.getBoundingClientRect && e.getBoundingClientRect();
+      if (!r || typeof r.width === 'undefined' || typeof r.height === 'undefined') continue;
       const cs = getComputedStyle(e);
       const aria = {};
-      for (const attr of e.getAttributeNames()) {
-        if (attr.startsWith('aria-')) aria[attr] = e.getAttribute(attr);
-      }
+      try {
+        const attrs = (typeof e.getAttributeNames === 'function') ? e.getAttributeNames() : [];
+        for (const attr of attrs) {
+          if (attr && attr.startsWith('aria-')) aria[attr] = e.getAttribute(attr);
+        }
+      } catch (_) {}
       const basicVisible = (r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none');
       const advVisible = isVisibleAdvanced(e, r, cs);
       const inViewport = isInViewportRect(r);
@@ -234,7 +244,9 @@
     const seen = new Set();
     for (let i = 0; i < nodes.length && urls.length < limit; i++) {
       const e = nodes[i];
-      const r = e.getBoundingClientRect();
+      if (!e || typeof e.getBoundingClientRect !== 'function') continue;
+      const r = e.getBoundingClientRect && e.getBoundingClientRect();
+      if (!r || typeof r.width === 'undefined' || typeof r.height === 'undefined') continue;
       if (!(r.width > 0 && r.height > 0)) continue;
       if (!(r.bottom > 0 && r.right > 0 && r.top < vh && r.left < vw)) continue;
       const cs = getComputedStyle(e);
@@ -378,5 +390,211 @@
     findMainScrollContainer,
     scrollContainerTo,
     getContainerMetrics,
+    // --- injected helpers (lightweight, safe-return) ---
+    annotateControls: async function(opts){
+      try{
+        const setDomIdAttr = !!(opts && opts.setDomIdAttr);
+        const enableProbe = !!(opts && opts.enableProbe);
+        const probeMax = Math.max(0, Number(opts && opts.probeMax) || 30);
+        const probeWaitMs = Math.max(0, Number(opts && opts.probeWaitMs) || 200);
+        const noNone = !!(opts && opts.noNone);
+        const nodes = Array.from(document.querySelectorAll('*'));
+        let count = 0;
+        const inViewport = (el) => {
+          const r = el.getBoundingClientRect && el.getBoundingClientRect();
+          if (!r) return false;
+          return isInViewportRect(r) && isVisibleAdvanced(el, r);
+        };
+        const styleOf = (el) => (el && el.ownerDocument && el.ownerDocument.defaultView) ? el.ownerDocument.defaultView.getComputedStyle(el) : getComputedStyle(el);
+        const isFill = (el) => {
+          const tag = (el.tagName||'').toLowerCase();
+          const role = (el.getAttribute('role')||'').toLowerCase();
+          if (tag==='input' || tag==='textarea') return true;
+          if (role==='textbox' || role==='combobox') return true;
+          if (el.isContentEditable) return true;
+          if (tag==='label' && el.getAttribute('for')) return true; // 作为代理
+          return false;
+        };
+        const isClick = (el) => {
+          const tag = (el.tagName||'').toLowerCase();
+          const role = (el.getAttribute('role')||'').toLowerCase();
+          const it = (el.getAttribute('type')||'').toLowerCase();
+          if (tag==='button') return true;
+          if (tag==='input' && ['button','submit','reset','image'].includes(it)) return true;
+          if (role==='button') return true;
+          if (tag==='a') return true;
+          if (el.hasAttribute && el.hasAttribute('onclick')) return true;
+          const cs = styleOf(el); if (cs && String(cs.cursor||'').toLowerCase()==='pointer') return true;
+          const tabindex = Number(el.getAttribute && el.getAttribute('tabindex')); if (!Number.isNaN(tabindex) && tabindex>=0) return true;
+          return false;
+        };
+        const isHoverCandidate = (el) => {
+          const role = (el.getAttribute('role')||'').toLowerCase();
+          if (el.getAttribute('aria-haspopup')==='true') return true;
+          const cls = (el.className||'').toLowerCase();
+          if (/dropdown|tooltip|menu|hoverable|popover/.test(cls)) return true;
+          if (/(menubar|menu|navigation)/.test(role)) return true;
+          return false;
+        };
+        const setAttrs = (el, i, primary, reason, conf, extra={}) => {
+          try{
+            const domId = el.getAttribute && el.getAttribute('id') || '';
+            if (setDomIdAttr) el.setAttribute('__selectorid', 'd'+i);
+            if (domId) el.setAttribute('__domid', domId);
+            if (primary || !noNone) el.setAttribute('__actiontype', primary||'none');
+            if (conf!=null) el.setAttribute('__act_confidence', String(conf));
+            if (reason) el.setAttribute('__act_reason', String(reason));
+            if (extra && typeof extra==='object'){
+              if (extra.mightNavigate!=null) el.setAttribute('__might_navigate', String(!!extra.mightNavigate));
+            }
+            count++;
+          }catch(_){ }
+        };
+        const safeWait = (ms)=>new Promise(r=>setTimeout(r, Math.max(0,ms||0)));
+        // popup-like 检测
+        const popupLikeCount = () => {
+          const sel = [
+            '[role="dialog"]','[role="listbox"]','[role="tooltip"]','[role="menu"]','[role="grid"]',
+            '.dropdown','.menu','.tooltip','.calendar','.datepicker','.panel','.popup','.popover','.hs_hot-city-picker', '.hs_star-choice', '.hotel-search-box-roomguest-choice'
+          ].join(',');
+          return document.querySelectorAll(sel).length;
+        };
+        const preventOnce = () => {
+          const handler = (ev)=>{ try{ ev.preventDefault(); ev.stopPropagation(); }catch(_){ } };
+          document.addEventListener('click', handler, true);
+          return () => { try{ document.removeEventListener('click', handler, true); }catch(_){ } };
+        };
+        let probed = 0;
+        for (let i=0;i<nodes.length;i++){
+          const el = nodes[i];
+          try{
+            if (!el || typeof el.getBoundingClientRect!=='function') continue;
+            if (!inViewport(el)) continue;
+            // 静态判定
+            const tag = (el.tagName||'').toLowerCase();
+            const role = (el.getAttribute('role')||'').toLowerCase();
+            const href = (el.getAttribute('href')||'');
+            const primaryStatic = (isFill(el) ? 'fill' : (isClick(el) ? 'click' : (isHoverCandidate(el) ? 'hover' : null)));
+            if (primaryStatic==='fill'){
+              setAttrs(el, i, 'fill', tag==='label'?'label-for':'static-fill', 0.9, {mightNavigate:false});
+              continue;
+            }
+            if (primaryStatic==='click'){
+              const mightNav = (tag==='a' && href && !/^\s*#/.test(href) && !/^\s*javascript:/i.test(href));
+              setAttrs(el, i, 'click', 'static-click', mightNav?0.8:0.7, {mightNavigate: mightNav});
+              continue;
+            }
+            // 需要探针或 hover 候选
+            let decided = false;
+            if (enableProbe && probed < probeMax){
+              probed++;
+              const before = popupLikeCount();
+              // hover 探针
+              try{ el.dispatchEvent(new MouseEvent('mouseover',{bubbles:true})); }catch(_){ }
+              try{ el.dispatchEvent(new MouseEvent('mouseenter',{bubbles:true})); }catch(_){ }
+              try{ el.focus && el.focus(); }catch(_){ }
+              await safeWait(probeWaitMs);
+              const afterHover = popupLikeCount();
+              if (afterHover > before){
+                setAttrs(el, i, 'hover', 'hover_probe_popup', 0.8, {mightNavigate:false});
+                decided = true;
+              }
+              if (!decided){
+                // click 探针（阻断默认）
+                const undo = preventOnce();
+                try{ el.click && el.click(); }catch(_){ }
+                await safeWait(probeWaitMs);
+                const afterClick = popupLikeCount();
+                try{ undo && undo(); }catch(_){ }
+                if (afterClick > before){
+                  setAttrs(el, i, 'click', 'click_probe_popup', 0.8, {mightNavigate:false});
+                  decided = true;
+                }
+              }
+            }
+            if (!decided){
+              // 兜底：有点击信号则 click，否则 none/跳过
+              const cs = styleOf(el);
+              const pointer = cs && String(cs.cursor||'').toLowerCase()==='pointer';
+              const tabindex = Number(el.getAttribute && el.getAttribute('tabindex'));
+              if (pointer || (!Number.isNaN(tabindex) && tabindex>=0) || el.hasAttribute('onclick')){
+                setAttrs(el, i, 'click', 'fallback-click', 0.6, {mightNavigate:false});
+              }else{
+                if (!noNone) setAttrs(el, i, 'none', 'uncertain', 0.1, {mightNavigate:false});
+              }
+            }
+          }catch(_){ /* ignore */ }
+        }
+        return { ok:true, count };
+      }catch(e){
+        return { ok:false, error: String(e), count:0 };
+      }
+    },
+    revealInteractively: function(opts){
+      try{
+        const maxActions = Math.max(0, Number(opts && opts.maxActions) || 8);
+        const totalBudgetMs = Math.max(0, Number(opts && opts.totalBudgetMs) || 15000);
+        const waitMs = Math.max(0, Number(opts && opts.waitMs) || 800);
+        const steps = [];
+        let actions = 0;
+        const t0 = Date.now();
+        const rafFrames = (n)=>new Promise(r=>{ let i=0; const step=()=>{ i++; if(i>=Math.max(1,n||1)) return r(true); requestAnimationFrame(step); }; requestAnimationFrame(step); });
+        const nodes = Array.from(document.querySelectorAll('[__actiontype]'));
+        let navDetected = false;
+        for (const el of nodes){
+          if (actions>=maxActions) break;
+          if ((Date.now()-t0)>=totalBudgetMs) break;
+          let ok=false; let navigated=false; let sel=null; let act=null;
+          try{
+            act = (el.getAttribute('__actiontype')||'').toLowerCase();
+            const sid = (el.getAttribute('__selectorid')||'');
+            sel = sid ? `[__selectorid="${sid}"]` : null;
+            const before = String(location.href);
+            if (act==='click' || act==='toggle' || act==='select'){
+              el.click(); ok=true; actions++;
+            } else if (act==='type'){
+              el.focus(); try{ document.execCommand('insertText', false, 'a'); }catch(_){ /* noop */ }
+              ok=true; actions++;
+            } else if (act==='navigate'){
+              // Avoid real navigation: hover + focus only
+              try{ el.dispatchEvent(new MouseEvent('mouseover', {bubbles:true})); }catch(_){ }
+              try{ el.focus(); }catch(_){ }
+              ok=true; actions++;
+            }
+            // wait a little for UI
+            try{ /* two frames */ }catch(_){ }
+            // eslint-disable-next-line no-unused-expressions
+            rafFrames && rafFrames(2);
+            try{ /* fixed wait */ }catch(_){ }
+            const p = new Promise(r=>setTimeout(r, waitMs));
+            try{ p && (void 0); }catch(_){ }
+            // detect nav
+            const after = String(location.href);
+            if (after !== before) navigated = true;
+          }catch(_){ ok=false; }
+          steps.push({ sel, act, ok, navigated });
+          if (navigated) { navDetected = true; break; }
+        }
+        return { ok:true, actions, steps, navigated: navDetected };
+      }catch(e){
+        return { ok:false, error: String(e), actions:0, steps:[], navigated:false };
+      }
+    },
+    getOuterHTMLs: function(items){
+      try{
+        const out = [];
+        for (const it of (items||[])){
+          try{
+            const sel = it && it.selector; const id = it && it.id; const type = it && it.type;
+            const el = sel ? document.querySelector(sel) : null;
+            if (el){ out.push({ id, selector: sel, type, html: el.outerHTML || '', found:true }); }
+            else { out.push({ id, selector: sel, type, found:false }); }
+          }catch(ex){ out.push({ id: it && it.id, selector: it && it.selector, type: it && it.type, found:false, error:String(ex) }); }
+        }
+        return { ok:true, items: out };
+      }catch(e){
+        return { ok:false, error: String(e), items: [] };
+      }
+    },
   };
 })();

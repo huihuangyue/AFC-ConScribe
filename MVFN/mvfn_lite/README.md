@@ -1,6 +1,132 @@
-# MVFN‑lite 代码结构说明（设计文档，仅文档不含代码）
+# MVFN‑lite 代码结构说明
 
-本文件描述 mvfn_lite 目录下“拟定的文件结构”，逐一给出：作用、输入、输出、主要依赖与被谁调用。当前阶段仅为设计文档，尚未创建任何源代码文件。
+本文件描述 mvfn_lite 目录下“拟定的文件结构”，逐一给出：作用、输入、输出、主要依赖与被谁调用。除设计文档外，提供了一个实用的离线分析脚本，便于直接在采集产物上做元素静态/动态的可视化标注。本文同时规划了“网络请求与 DOM 变更记录 + API/数据库驱动关联”的扩展接口（仅文档，暂不编写代码）。
+
+## 实用脚本（离线元素分类）
+
+- element_classify_offline.py
+  - 作用：输入 `workspace/data/<domain>/<ts>/` 目录，基于 `dom_summary*.json` 与 `controls_tree.json` 将页面元素（控件树节点）离线分类为：
+    - `static`：初始即存在且未明显变化；
+    - `dynamic`：滚动后新增或显著变化；
+    - `db_likely`：启发式提示（信息流/卡片/广告等），并非严格的“接入数据库”证明。
+  - 输出：
+    - `<dir>/element_classification.json`（每节点标签与汇总），
+    - `<dir>/element_classified_overlay.png`（在 `screenshot_loaded.png` 上彩色叠加）。
+  - 用法：
+    ```bash
+    python MVFN/mvfn_lite/element_classify_offline.py \
+      --dir workspace/data/bing_com/20251108202329 \
+      --image screenshot_loaded.png \
+      --alpha 40 --thickness 3
+    ```
+    - 说明：若要更可靠地判断“API/数据库驱动”，应在采集阶段记录网络请求与 DOM 变更时序并在本脚本中做关联（后续可扩展）。
+
+## 工具与脚本总览（作用与用法）
+
+- `run_text_pipeline.py`
+  - 作用：一键运行“候选生成 + 文本证据提取”。若 `AFC/` 已存在，将清空后重建，确保产物新鲜。
+  - 用法：
+    ```bash
+    python -m MVFN.mvfn_lite.run_text_pipeline --dir workspace/data/<domain>/<ts>
+    ```
+  - 输出：
+    - `AFC/candidates.json`（含 stats/rates：各步数量与筛选率）
+    - `AFC/evidence_text.json`
+
+- `candidate_generation.py`
+  - 作用：优先基于 `controls_tree.json` 生成候选；失败时回退 `dom_summary*.json`。提供控件启发式评分与去重。
+  - 调用（模块）：
+    ```python
+    from MVFN.mvfn_lite.candidate_generation import generate_candidates
+    generate_candidates('<data_dir>')
+    ```
+
+- `evidence_text.py`
+  - 作用：基于 DOM 为候选提取主文本与证据片段；输出 `text_quality` 指标。
+  - 调用（模块）：
+    ```python
+    from MVFN.mvfn_lite.evidence_text import build_text_evidence
+    build_text_evidence('<data_dir>')
+    ```
+
+- `metrics_scoring.py`
+  - 作用：统计指标并生成综合置信度（final_confidence）。
+  - 用法：
+    ```bash
+    python -m MVFN.mvfn_lite.metrics_scoring --dir workspace/data/<domain>/<ts>
+    ```
+  - 输出：
+    - `AFC/metrics.json`（含筛选步骤统计与直方）
+    - `AFC/candidates_scored.json`（为每个候选附加 final_confidence）
+
+- `overlay_candidates.py`
+  - 作用：把 top‑N（final_confidence ≥ 阈值）的候选叠加画在截图上，结果默认写入 `AFC/` 目录。
+  - 用法：
+    ```bash
+    python -m MVFN.mvfn_lite.overlay_candidates \
+      --dir workspace/data/<domain>/<ts> \
+      --topn 50 --min-conf --thickness 3 --alpha 0
+    ```
+  - 输出：
+    - `AFC/afc_top_candidates_overlay.png`
+
+- `element_classify_offline.py`
+  - 作用：静态/动态/db_likely 离线标注（使用 dom 摘要与控件树）。
+  - 用法见上；输出 `element_classification.json` 与 `element_classified_overlay.png`。
+
+
+## 采集扩展设计：网络请求与 DOM 变更日志（仅文档）
+
+目标：在不依赖在线接口调用与 Cookie 注入的前提下，通过采集阶段的“网络请求日志 + DOM 变更时序”来推断哪些页面元素由 API/后端数据驱动，从而在离线脚本中进行更可靠的 `api_likely` 标注（相较于启发式 `db_likely`）。
+
+一）采集器输出新增文件（detect 层建议实现，文件命名与结构约定）
+- `network.json`
+  - 事件流：`events: [{id, t_start, t_end?, url, method, status, mime, transfer_size, initiator}]`
+  - 取舍：仅持久化 XHR/fetch/JSON/HTML 文档与图片等关键资源；忽略静态小资源（阈值 1–2KB 可配置）。
+  - 时间：使用 `performance.now()` 或“采集器单调时间”；与 `mutations.json` 共时基。
+- `mutations.json`
+  - 事件流：`mutations: [{t, type: 'added|text|attributes', index, bbox, page_bbox, selector, container?, text?}]`
+  - 采集方式：页面注入 `MutationObserver`；落盘前做限流与采样（防爆内存）。
+- 兼容：若浏览器或 CSP 禁止注入/监听，则写出空数组并在 `meta.warnings` 标记 `NETWORK_CAPTURE_UNAVAILABLE`/`MUTATION_CAPTURE_UNAVAILABLE`。
+
+二）离线关联算法（mvfn_lite 层建议实现）
+- 输入：`network.json`、`mutations.json`、`controls_tree.json`、`dom_summary*.json`、截图。
+- 关联步骤：
+  1. 过滤响应：`mime in {application/json, text/json}` 或 `url` 命中 `/api|/ajax|/feed|/graph|/search`；记为候选 API 响应。
+  2. 时间窗匹配：对每条 API 响应，在 `t_end ~ t_end+Δt` 窗（如 0.1–2.0s）内收集涉及内容块（content 型）的变更事件（added/text/attributes）。
+  3. 空间约束：将变更节点映射到 `controls_tree.nodes`，限定在滚动容器或视口附近，排除悬浮/遮罩层。
+  4. 打分：时间接近度 + 变更规模（节点数/面积）+ 文本变化强度 + 资源体积/状态码；超过阈值则将相关节点标注为 `api_likely` 并附上证据 `{api: {url, t_end, score, nodes:[id…]}}`。
+- 输出：在 `element_classification.json` 的节点条目中追加 `source: static|dynamic|db_likely|api_likely`；优先级 `api_likely > db_likely > dynamic > static`。
+
+三）新增/调整的 CLI（detect 与脚本，建议）
+- detect（采集阶段，建议新增开关）：
+  - `--capture-network`（默认开）写出 `network.json`；
+  - `--capture-mutations`（默认开）写出 `mutations.json`；
+  - `--capture-budget events=5000, window_ms=2000, min_kb=1` 控制采样与阈值。
+- mvfn_lite（离线脚本，建议新增参数）：
+  - `--link-api` 启用关联计算（默认开，若无 `network.json/mutations.json` 则跳过）。
+
+四）JSON 草案（便于实现时直接落地）
+- network.json
+```json
+{
+  "version": "v0.1",
+  "events": [
+    {"id": 1, "t_start": 123.4, "t_end": 456.7, "url": "https://…/api/feed", "method": "GET", "status": 200, "mime": "application/json", "transfer_size": 84231, "initiator": "script"}
+  ]
+}
+```
+- mutations.json
+```json
+{
+  "version": "v0.1",
+  "mutations": [
+    {"t": 458.0, "type": "added", "index": 123, "bbox": [x,y,w,h], "page_bbox": [X,Y,W,H], "selector": "div.card", "text": "…"}
+  ]
+}
+```
+
+> 注：上述为约定与接口设计，当前阶段不提交实现代码；detect 与脚本按该约定对齐后即可无缝联动。
 
 ## 总入口与类型
 
@@ -125,4 +251,3 @@
 - 输出（整体）：AFC 节点列表（标签/动作/bbox/文本/证据/分值/向量/关系、可解释明细）。
 
 > 说明：上述文件为“拟定结构”，为后续实现提供明确边界。当前阶段不创建任何 `.py` 或数据文件，避免越界实现。
-

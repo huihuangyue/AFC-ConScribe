@@ -24,7 +24,19 @@ ARTIFACTS = {
     "meta": "meta.json",
     "scroll_info": "scroll_info.json",
     "controls_tree": "controls_tree.json",
+    # 额外派生产物
+    "roots_list": "roots.json",
+    "reveal_log": "reveal_log.json",
+    # DOM 片段（每个节点/控件一段 HTML）
+    "tips_dir": "tips",
+    "tips_index": "tips/index.json",
+    # 片段导出目录与索引（按第一层控件，从上到下）
+    "snippets_dir": "snippets",
+    "snippets_index": "snippets/index.json",
     # 片段截图目录与索引
     "segments_dir": "segments",
     "segments_meta": "segments/index.json",
+    # 主控件块与交互图
+    "blocks": "blocks.json",
+    "graphs_dir": "graphs",
 }
