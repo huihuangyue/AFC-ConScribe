@@ -18,12 +18,15 @@ import re
 import time
 from typing import Any, Dict, List
 
-from . import build as builder
-from . import codegen as _codegen
 try:
-    from utils.skill_export import export_program_py  # type: ignore
+    from utils.skill_export import export_program_py, _detect_main_func_name  # type: ignore
 except Exception:  # pragma: no cover
     export_program_py = None  # type: ignore
+    _detect_main_func_name = None  # type: ignore
+
+from . import build as builder
+from . import codegen as _codegen
+from .args_schema import attach_args_schema_from_program
 
 
 def _pick_node_by_selector(controls_tree: Dict[str, Any], selector: str) -> Dict[str, Any] | None:
@@ -113,7 +116,22 @@ def generate_for_selector(
             prog["language"] = prog.get("language") or "python"
             prog["entry"] = prog.get("entry") or f"program__{skill.get('id','unknown')}__auto"
             prog["code"] = code
+            # 若可用，则从代码中推断主函数名，写入 main_func 便于后续调度/调用
+            try:
+                if _detect_main_func_name is not None and not prog.get("main_func"):
+                    main_name = _detect_main_func_name(code)  # type: ignore[operator]
+                    if main_name:
+                        prog["main_func"] = main_name
+            except Exception:
+                if verbose:
+                    print("[skill.generate] main_func inference failed")
             skill["program"] = prog
+            # 从 program.code 推断 args_schema（仅在原 schema 为空时生效）
+            try:
+                attach_args_schema_from_program(skill, overwrite=False)
+            except Exception as _ae:
+                if verbose:
+                    print(f"[skill.generate] args_schema inference failed: {type(_ae).__name__}: {_ae}")
             # 记录元数据
             meta = skill.get("meta") or {}
             meta["codegen"] = {

@@ -53,6 +53,7 @@ SAFE_BUILTINS = {
     "bool": bool,
     "__import__": __import__,
     "Exception": Exception,
+    "ValueError": ValueError,
     "BaseException": BaseException,
 }
 

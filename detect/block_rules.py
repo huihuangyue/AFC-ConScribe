@@ -7,7 +7,12 @@ block_rules
 - 尺寸异常（0×0、过小、过大、极端长宽比）直接否决；
 - 仅在“链表压缩”后的分叉节点（children 数≥2）上判断；
 - 肯定条件：子树存在“提交按钮”（action==submit 或选择器含 search/submit）；
-- 参考条件：节点自身类名命中内层容器词（inner/inner-wrap/innerwrap/list/items）。
+- 参考条件：节点自身类名命中“内层/容器”类词（inner/inner-wrap/innerwrap/list/items/nav/wrap/container/footer 等）。
+
+当前版本相对最初实现做了“放宽”：
+- 仍然保留尺寸否决与链表压缩逻辑；
+- 但不再强制“提交按钮”作为唯一入口，只要命中容器类词（如导航栏/底部/列表容器）也可以成为块；
+- 当 blocks_strict_require_inner=True 时，要求“内层类词 OR 提交按钮”，避免完全无语义支撑的大块。
 
 产物：写入 blocks.json（ARTIFACTS["blocks"]），形式：
 {
@@ -26,7 +31,21 @@ except Exception:
     from constants import ARTIFACTS, DEFAULT_VIEWPORT  # type: ignore
 
 
-INNER_KWS = ["inner", "inner-wrap", "innerwrap", "list", "items"]
+# “内层容器”类关键字：在严格规则里作为强语义信号
+# 早期仅有 inner/inner-wrap/list/items，过于激进，容易只留下 1 个块；
+# 这里扩展一些常见容器/导航类词，用于放宽筛选。
+INNER_KWS = [
+    "inner",
+    "inner-wrap",
+    "innerwrap",
+    "list",
+    "items",
+    "nav",
+    "wrap",
+    "container",
+    "panel",
+    "footer",
+]
 
 
 def _read_json(path: str) -> Dict[str, Any]:
@@ -171,21 +190,34 @@ def segment_blocks_strict(out_dir: str, *, require_inner_kw: bool = False, max_b
         veto = _size_veto(bb, vp)
         if veto:
             continue
-        # 肯定条件：提交按钮存在
-        if not _has_submit_in_subtree(nid, by_id):
-            continue
-        # 参考条件：内层类词
+        # 肯定条件：提交按钮存在（表单/搜索模块），或命中“内层/容器”类词（导航栏、列表容器、底部等）
+        has_submit = _has_submit_in_subtree(nid, by_id)
         cls = _class_of_node(nid, elements).lower()
         inner_hit = any(kw in cls for kw in INNER_KWS)
-        if require_inner_kw and (not inner_hit):
+
+        # blocks_strict_require_inner=True 的语义调整为：
+        #   需要（inner_hit OR has_submit），避免只靠面积选出毫无语义的大块。
+        if require_inner_kw and not (inner_hit or has_submit):
             continue
+
+        # 基本放宽规则：若既没有提交按钮、又没有容器类词，则直接跳过；
+        # 即“尺寸 + 结构 + (提交按钮 OR 容器类名)”三要素缺一不可。
+        if not (has_submit or inner_hit):
+            continue
+
+        # 进一步约束 selector：避免只选到纯标签（如 "div"、"section"），
+        # 至少要求带有 id/class/属性之一，便于后续稳定定位。
+        sel = (node.get("selector") or "").strip()
+        if sel and not any(ch in sel for ch in ("#", ".", "[")):
+            continue
+
         picked.append({
             "id": nid,
-            "selector": node.get("selector"),
+            "selector": sel,
             "bbox": [bb[0], bb[1], bb[2], bb[3]],
             "reasons": {
                 "size_ok": True,
-                "has_submit": True,
+                "has_submit": has_submit,
                 "inner_kw": inner_hit,
                 "children_count": len(node.get("children") or []),
             }
@@ -200,4 +232,3 @@ def segment_blocks_strict(out_dir: str, *, require_inner_kw: bool = False, max_b
     except Exception:
         pass
     return out
-

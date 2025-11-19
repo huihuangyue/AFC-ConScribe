@@ -66,3 +66,6 @@ python -m skill.build --run-dir /mnt/f/paperwork/AFC-ConScribe/workspace/data/ct
 
 REPAIR_USE_LLM=1 python -m aid.repair --skill "/mnt/f/paperwork/AFC-ConScribe/workspace/data/ctrip_com/20251112014916/skill/Skill_kakxi_d321.json" --new-run-dir "/mnt/f/paperwork/AFC-ConScribe/workspace/data/ctrip_com/20251112143400" --old-run-dir "/mnt/f/paperwork/AFC-ConScribe/workspace/data/ctrip_com/20251112014916" --out "/mnt/f/paperwork/AFC-ConScribe/workspace/data/ctrip_com/20251112143400/repair_skill/Skill_kakxi_d321_repaired.json" --log-dir "/mnt/f/paperwork/AFC-ConScribe/workspace/data/ctrip_com/20251112143400/repair_skill/_logs" --use-llm-locators --use-llm-preconditions --use-llm-program --use-llm-naming
 
+python -m planner.run_task \
+  --run-dir "workspace/data/ctrip_com/20251116234238" \
+  --task "在携程首页搜索上海 2025年11月19日入住 11月23日退房 1间房 2位成人 0儿童 五星（钻），在外滩"
