@@ -135,7 +135,10 @@ def build_skill_index(
             sid = str(skill.get("id") or os.path.splitext(fname)[0])
             meta = skill.get("meta") or {}
             name = str(skill.get("name") or meta.get("name") or sid)
-            desc = str(meta.get("description") or "")
+            # 描述优先级：顶层 description > meta.description > 空串
+            desc = str(
+                (skill.get("description") or meta.get("description") or "")
+            )
             domain = str(skill.get("domain") or meta.get("domain") or "")
             pre = skill.get("preconditions") or {}
             url_matches = _safe_list_str(pre.get("url_matches"))
@@ -199,4 +202,3 @@ def _cli() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(_cli())
-

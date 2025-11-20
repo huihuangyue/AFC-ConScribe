@@ -69,3 +69,29 @@ REPAIR_USE_LLM=1 python -m aid.repair --skill "/mnt/f/paperwork/AFC-ConScribe/wo
 python -m planner.run_task \
   --run-dir "workspace/data/ctrip_com/20251116234238" \
   --task "在携程首页搜索上海 2025年11月19日入住 11月23日退房 1间房 2位成人 0儿童 五星（钻），在外滩"
+python -m planner.run_task   --run-dir "workspace/data/ctrip_com/20251116234238"   --task "圣诞节我们一家三口要去北京天坛旅游，帮我找一下那个时候的旅店信息"
+python -m skill.select --run-dir "$RUN_DIR" --top-k 20
+python -m skill.select \
+  --run-dir "$RUN_DIR" \
+  --top-k 20 \
+  --min-children 1 \
+  --no-require-submit \
+  --no-require-inner-kw \
+  --min-area 10000
+find "$RUN_DIR/skill" -name "Skill_*.json" -print0 \
+  | xargs -0 -n1 -I{} python -m skill.description --skill "{}"
+python -m planner.env_summary --run-dir "$RUN_DIR"
+python -m planner.skill_index --skills-root "$RUN_DIR/skill"
+python -m skill.select \
+  --run-dir "$RUN_DIR" \
+  --top-k 20 \
+  --min-children 1 \
+  --no-require-submit \
+  --no-require-inner-kw \
+  --min-area 10000 \
+| while read -r sel; do
+    python -m skill.generate \
+      --run-dir "$RUN_DIR" \
+      --selector "$sel" \
+      --with-codegen
+  done

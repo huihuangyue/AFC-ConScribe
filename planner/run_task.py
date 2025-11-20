@@ -40,9 +40,10 @@ def _read_json(path: str) -> Dict[str, Any]:
 def _ensure_page_summary(run_dir: str, verbose: bool = True) -> Dict[str, Any]:
     p = os.path.join(run_dir, "page_summary.json")
     if not os.path.exists(p):
-        if verbose:
-            print(f"[run_task] page_summary.json not found, build via env_summary …")
-        build_page_summary(run_dir, verbose=verbose)
+        raise FileNotFoundError(
+            f"page_summary.json not found under {run_dir}. "
+            f"请先在预处理阶段运行: python -m planner.env_summary --run-dir \"{run_dir}\""
+        )
     return _read_json(p)
 
 
@@ -50,9 +51,10 @@ def _ensure_skills_index(run_dir: str, verbose: bool = True) -> Dict[str, Any]:
     skills_root = os.path.join(run_dir, "skill")
     idx_path = os.path.join(skills_root, "skills_index.json")
     if not os.path.exists(idx_path):
-        if verbose:
-            print(f"[run_task] skills_index.json not found, build via skill_index …")
-        build_skill_index(skills_root, out_path=idx_path, verbose=verbose)
+        raise FileNotFoundError(
+            f"skills_index.json not found under {skills_root}. "
+            f"请先在预处理阶段运行: python -m planner.skill_index --skills-root \"{skills_root}\""
+        )
     return _read_json(idx_path)
 
 
@@ -256,8 +258,14 @@ def run_task(
 
 
 def _cli() -> int:
-    ap = argparse.ArgumentParser(description="Run a natural language task in browser via skills (end-to-end)")
-    ap.add_argument("--run-dir", required=True, help="Detect run dir (with blocks/controls_tree/skill 等)")
+    ap = argparse.ArgumentParser(
+        description="Run a natural language task in browser via pre-built skills (online phase only)"
+    )
+    ap.add_argument(
+        "--run-dir",
+        required=True,
+        help="技能库根目录（需已包含 page_summary.json 与 skill/skills_index.json）",
+    )
     ap.add_argument("--task", required=True, help="Natural language task description")
     ap.add_argument("--top-k", type=int, default=5)
     ap.add_argument(

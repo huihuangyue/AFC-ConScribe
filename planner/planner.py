@@ -98,15 +98,24 @@ def _llm_plan_from_candidates(
         if isinstance(b, dict) and str(b.get("id")) == str(main_id):
             main_block = b
             break
-
     def _summarise_candidate(c: CandidateSkill) -> Dict[str, Any]:
+        """将候选技能整理成喂给 LLM 的精简结构。
+
+        关键字段：
+        - id/name：标识技能；
+        - description：技能做什么的简短自然语言概述（来自技能主函数 docstring）；
+        - arg_names/has_args：参数名列表与是否需要参数；
+        - selectors/score/reason：供模型在需要时参考的附加线索。
+        """
         raw = c.raw or {}
         args = raw.get("args") or []
         has_args = bool(args)
         arg_names = [a.get("name") for a in args if isinstance(a, dict) and a.get("name")]
+        description = str(raw.get("description") or "").strip()
         return {
             "id": c.id,
             "name": c.name,
+            "description": description,
             "selectors": c.selectors,
             "has_args": has_args,
             "arg_names": arg_names,
@@ -148,7 +157,8 @@ def _llm_plan_from_candidates(
 
     prompt = json.dumps(prompt_obj, ensure_ascii=False, indent=2)
     sys_msg = _load_prompt("plan_skill_selection.md")
-    plan_json = complete_json(prompt, system=sys_msg, config=config, verbose=verbose)
+    # 选择阶段使用温度 0，尽量避免随机性
+    plan_json = complete_json(prompt, system=sys_msg, temperature=0.0, config=config, verbose=verbose)
     if not isinstance(plan_json, dict):
         raise ValueError("LLM 返回的 plan 不是 JSON 对象")
     return plan_json

@@ -27,6 +27,7 @@ except Exception:  # pragma: no cover
 from . import build as builder
 from . import codegen as _codegen
 from .args_schema import attach_args_schema_from_program
+from .description import attach_description_from_program
 
 
 def _pick_node_by_selector(controls_tree: Dict[str, Any], selector: str) -> Dict[str, Any] | None:
@@ -132,6 +133,12 @@ def generate_for_selector(
             except Exception as _ae:
                 if verbose:
                     print(f"[skill.generate] args_schema inference failed: {type(_ae).__name__}: {_ae}")
+            # 从主函数 docstring 推断技能描述（仅在原描述为空时生效）
+            try:
+                attach_description_from_program(skill, overwrite=False)
+            except Exception as _de:
+                if verbose:
+                    print(f"[skill.generate] description inference failed: {type(_de).__name__}: {_de}")
             # 记录元数据
             meta = skill.get("meta") or {}
             meta["codegen"] = {

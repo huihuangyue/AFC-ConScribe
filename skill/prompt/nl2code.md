@@ -82,6 +82,8 @@ locator.get_attribute("name")
 ### 4.3 交互规则
 **严格限制**:
 - **禁止**: 使用未定义的操作，调用外部框架（Selenium、bs4等）
+- 对 Playwright 的方法调用（如 `locator.click`、`locator.fill` 等），**只允许使用关键字参数**（如 `timeout=...`、`force=...`），禁止塞入多余的位置参数（例如 `click(None, timeout=...)`）。
+- 若需要封装重试逻辑，必须以 `Locator` 作为第一个参数，由辅助函数在内部调用 `locator.click(...)` 等，而不是传入“操作函数 + 选择器”这类高阶封装。
 
 ## 5. 代码质量要求
 
@@ -113,7 +115,7 @@ except Exception as e:
 
 参数(Args):
     page (Page): Playwright 页面对象
-    param_name (type): 参数说明
+    param_name (type): 参数说明，如果是多个按钮中选择一个，提供参数应该是多个按钮中一个选项的列表而非纯文本描述
 
 返回(Returns):
     type: 返回值说明
@@ -147,6 +149,9 @@ except Exception as e:
   - 抛出 `RuntimeError(f"<step> failed: <reason> [selector=<...>]")`
   - 或返回结构 `{ "ok": false, "message": "...", "step": "...", "selector": "..." }`
 - 幂等与清理：必要时在 finally 中恢复状态（如关闭临时弹层、清理输入）。
+- **重试辅助函数约束**：
+  - 推荐使用形如 `_try_click(locator, *, timeout=..., retries=...)` 的签名，**第一个参数必须是 Locator 对象**；
+  - 禁止定义 `_retry_operation(operation, selector, **kwargs)` 这类“操作函数 + 选择器”的高阶封装，避免在调用时错误地给 Playwright 方法多塞一个位置参数。
 
 示例模板：
 ```python
@@ -176,6 +181,7 @@ def _try_click(locator, *, timeout=8000, retries=2):
 ### 6.1 智能处理
 - **动态内容**: 处理异步加载、分页等动态变化
 - **状态感知**: 操作前后重新获取元素状态
+- **多位选择**：提供下辖多种选择器的候选列表而非仅文本输入
 - **容错机制**: 提供多种选择器的 fallback 策略
 - **性能优化**: 避免不必要的重复查询
 - **弹窗避免**: 如果进行某些操作之后会进入弹窗，可以将其关闭。之后如果没有达成目标操作，可以进行重试操作
