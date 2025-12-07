@@ -35,9 +35,10 @@ def load_run_artifacts(run_dir: str) -> Dict[str, Any]:
         "dom_summary": try_load("dom_summary.json"),
         "ax": try_load("ax.json"),
         "meta": try_load("meta.json"),
+        # 可选 cookies.json（由 detect 层在 export_cookies=True 时写入）
+        "cookies": try_load("cookies.json"),
         "snippets_index": try_load(os.path.join("snippets", "index.json")) or {},
     }
 
 
 __all__ = ["read_json", "write_json", "load_run_artifacts"]
-

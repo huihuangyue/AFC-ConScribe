@@ -126,7 +126,7 @@ def collect(
     crop_margin_px: int = 200,
     crop_max_screens: int | None = 4,
     prefetch_positions: int = 5,
-    headless: bool = True,
+    headless: bool = False,
     human_verify: bool = False,
     overlay_mode_loaded: str = "auto",
     overlay_mode_tail: str = "auto",
@@ -192,6 +192,8 @@ def collect(
     explore_graph: bool = True,
     explore_graph_max_ops_per_block: int = 20,
     explore_graph_wait_ms: int = 500,
+    # 是否导出浏览器上下文 cookies 至 cookies.json（包含潜在敏感信息，默认关闭）
+    export_cookies: bool = False,
 ) -> str | Dict[str, Any]:
     """
     Collect page artifacts using Playwright and save under data/<domain>/<timestamp>/.
@@ -1555,6 +1557,19 @@ def collect(
             except Exception:
                 pass
 
+            # 可选：导出 Playwright context cookies（用于 Skill preconditions.cookies.set）
+            # 注意：可能包含登录/会话等敏感信息，默认仅在显式开启 export_cookies 时写入。
+            try:
+                if export_cookies and context is not None:
+                    try:
+                        ck = context.cookies()
+                    except Exception:
+                        ck = []
+                    if ck:
+                        write_json(os.path.join(out_dir, "cookies.json"), {"cookies": ck})
+            except Exception as _ce:
+                warnings.append({"code": "COOKIES_EXPORT_ERROR", "stage": "cookies", "error": str(_ce)})
+
     except BaseException as e:
         # Fatal error occurred (e.g., launch/navigation); write failure meta.
         # Gracefully handle KeyboardInterrupt / SystemExit as aborted
@@ -1738,6 +1753,12 @@ def _cli() -> int:
     p.add_argument("--after-nav-wait-ms", type=int, default=2000, help="Extra silent wait after load/networkidle (default: 2000)")
     p.add_argument("--ready-selector", type=str, default=None, help="Wait for this selector visible before capture (e.g., main content)")
     p.add_argument("--ready-selector-timeout-ms", type=int, default=10000, help="Timeout for ready selector (default: 10000)")
+    # cookies 导出（可能包含敏感信息，默认关闭）
+    p.add_argument(
+        "--export-cookies",
+        action="store_true",
+        help="Export Playwright context cookies to cookies.json under run_dir (may contain sensitive session data)",
+    )
     # 自动关闭弹层相关
     p.add_argument("--no-auto-close-overlays", dest="auto_close_overlays", action="store_false", help="Disable auto-closing overlays/masks")
     p.add_argument("--overlay-close-selectors", type=str, default=None, help="Comma-separated close button selectors to try")
@@ -1827,8 +1848,14 @@ def _cli() -> int:
     p.add_argument("--overlay-mode-tail", type=str, choices=["auto", "page", "viewport"], default="auto", help="Overlay mode for scrolled_tail overlay")
     p.add_argument("--no-extract-snippets", dest="extract_snippets", action="store_false", help="Do not extract first-layer control DOM snippets")
     # 运行模式
-    p.add_argument("--no-headless", dest="headless", action="store_false", help="Run browser in headed mode (default: headless)")
-    p.set_defaults(headless=True)
+    p.add_argument(
+        "--no-headless",
+        dest="headless",
+        action="store_false",
+        help="Run browser in headed mode (default: headed)",
+    )
+    # 默认使用有头浏览器，便于调试与观察；如需无头模式可在代码调用时显式传 headless=True
+    p.set_defaults(headless=False)
     p.add_argument("--human-verify", action="store_true", help="Pause after navigation to allow manual verification (slider/CAPTCHA)")
     # 日志开关
     p.add_argument("--verbose", action="store_true", help="Enable verbose logging (default: on)")
@@ -1837,6 +1864,7 @@ def _cli() -> int:
     args = p.parse_args()
     # 仅在提供 --config 时载入用户配置；不再自动加载默认配置文件
     cfg = load_json_config(args.config)
+    # 允许通过 JSON 配置与环境变量覆盖部分默认参数；CLI 最终优先。
     allowed = {
         "prewarm_scroll", "prewarm_max_steps", "prewarm_delay_ms",
         "prewarm_wait_before_ms", "prewarm_wait_after_ms",
@@ -1858,11 +1886,58 @@ def _cli() -> int:
         "reveal_max_actions", "reveal_total_budget_ms", "reveal_wait_ms",
         # annotate/probe
         "annotate_probe", "annotate_probe_max", "annotate_probe_wait_ms", "annotate_no_none",
+        "annotate_controls", "export_tips", "refine_parent_by_snippet",
         # tree size filter
         "filter_tree_by_size", "filter_min_w", "filter_min_h", "filter_min_area", "filter_max_area_ratio", "filter_cap_small_per_parent", "filter_keep_important",
+        # graph/blocks
+        "ai_blocks", "ai_blocks_max", "blocks_strict", "blocks_strict_require_inner",
+        "explore_graph", "explore_graph_max_ops", "explore_graph_wait_ms",
+        # rate-limit / single instance
+        "disable_proxy", "single_instance", "lock_file",
+        "min_interval_seconds", "jitter_seconds", "rate_state_file", "sleep_after_seconds",
+        # visual helpers
+        "live_outline_controls", "live_outline_color", "live_outline_width_px",
+        # cookies
+        "export_cookies",
     }
+
+    def _env_get(name: str):
+        """从环境变量 AFC_DETECT_<UPPER(name)> 读取覆盖值。"""
+        env_key = "AFC_DETECT_" + name.upper()
+        return os.getenv(env_key, None)
+
+    def _cast_like(value, default):
+        if value is None:
+            return default
+        # bool
+        if isinstance(default, bool):
+            return str(value).strip().lower() in ("1", "true", "yes", "on")
+        # int
+        if isinstance(default, int) and not isinstance(default, bool):
+            try:
+                return int(value)
+            except Exception:
+                return default
+        # float
+        if isinstance(default, float):
+            try:
+                return float(value)
+            except Exception:
+                return default
+        # string或其他
+        return str(value)
+
     def cfg_get(name, default):
-        return cfg.get(name, default) if isinstance(cfg, dict) and name in allowed else default
+        # 1) JSON 配置优先（若存在该键）
+        if isinstance(cfg, dict) and name in allowed and name in cfg:
+            return cfg.get(name, default)
+        # 2) 环境变量 AFC_DETECT_<NAME> 作为默认值覆盖
+        if name in allowed:
+            env_v = _env_get(name)
+            if env_v is not None:
+                return _cast_like(env_v, default)
+        # 3) 回退 CLI/default
+        return default
     result = collect(
         args.url,
         args.out_root,
@@ -1957,6 +2032,7 @@ def _cli() -> int:
         reveal_total_budget_ms=cfg_get("reveal_total_budget_ms", args.reveal_total_budget_ms),
         reveal_wait_ms=cfg_get("reveal_wait_ms", args.reveal_wait_ms),
         verbose=cfg_get("verbose", args.verbose),
+        export_cookies=cfg_get("export_cookies", getattr(args, "export_cookies", False)),
     )
     if args.return_info:
         print(json.dumps(result, ensure_ascii=False, indent=2))

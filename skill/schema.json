@@ -99,8 +99,34 @@
         },
         "login_state": { "type": "string" },
         "cookies": {
-          "type": "array",
-          "items": { "type": "string", "minLength": 1 }
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "set": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "name": { "type": "string", "minLength": 1 },
+                  "value": { "type": "string" },
+                  "domain": { "type": "string" },
+                  "path": { "type": "string" },
+                  "url": { "type": "string" },
+                  "expires": { "type": "number" },
+                  "httpOnly": { "type": "boolean" },
+                  "secure": { "type": "boolean" },
+                  "sameSite": { "type": "string" }
+                },
+                "required": ["name", "value"]
+              }
+            },
+            "required_names": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 },
+              "description": "Cookie names that should be present before execution (optional)."
+            }
+          }
         }
       },
       "required": ["url_matches", "exists"]
@@ -205,4 +231,3 @@
     }
   }
 }
-

@@ -94,6 +94,32 @@ def generate_for_selector(
             inp.run_dir,
             override_domain=domain,
         )
+        # 若 run_dir 提供 cookies.json，则为回退路径生成的技能同样附加 cookie 前置条件与登录态
+        try:
+            cookies = list(getattr(inp, "cookies", []) or [])
+        except Exception:
+            cookies = []
+        if cookies:
+            pre = skill.get("preconditions") or {}
+            cookies_obj = pre.get("cookies") or {}
+            if "set" not in cookies_obj:
+                cookies_obj["set"] = [dict(c) for c in cookies]
+            # 生成 required_names 摘要
+            try:
+                names = builder._cookie_names_from_list(cookies)  # type: ignore[attr-defined]
+            except Exception:
+                names = []
+            if names and "required_names" not in cookies_obj:
+                cookies_obj["required_names"] = list(names)
+            pre["cookies"] = cookies_obj
+            # 推断 login_state（若未设置）
+            try:
+                login_state = builder.infer_login_state_from_cookies(cookies)  # type: ignore[attr-defined]
+            except Exception:
+                login_state = None
+            if login_state and "login_state" not in pre:
+                pre["login_state"] = login_state
+            skill["preconditions"] = pre
 
     # 目标输出路径：以 JSON 文件名（去扩展名）创建同名子目录，JSON 与导出的 .py 存于该目录下
     safe_sel = _sanitize_filename_piece(selector)

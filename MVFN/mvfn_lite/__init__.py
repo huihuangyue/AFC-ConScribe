@@ -1,2 +1,0 @@
-"""MVFN-lite package init."""
-

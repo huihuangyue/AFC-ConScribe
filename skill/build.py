@@ -155,6 +155,7 @@ class Inputs:
     ax: Dict[str, Any]
     meta: Dict[str, Any]
     snippets: Dict[str, str]  # id -> absolute file path
+    cookies: List[Dict[str, Any]]  # optional global cookies for this run_dir
 
 
 def _domain_from_meta(meta: Dict[str, Any]) -> str:
@@ -267,6 +268,41 @@ def _build_by_text(el: Dict[str, Any]) -> List[str]:
     return out
 
 
+def _cookie_names_from_list(cookies: List[Dict[str, Any]]) -> List[str]:
+    """从 cookies 列表提取去重后的 cookie 名称（按出现顺序）。"""
+    names: List[str] = []
+    seen: set[str] = set()
+    for c in cookies or []:
+        if not isinstance(c, dict):
+            continue
+        name = str(c.get("name") or "").strip()
+        if not name:
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
+def infer_login_state_from_cookies(cookies: List[Dict[str, Any]]) -> Optional[str]:
+    """根据 cookie 名称启发式推断登录态。
+
+    规则（保守）：
+      - 若存在名称中包含 session/sess/sid/auth/token/login/user/uid 等关键词的 cookie，则视为 logged_in；
+      - 否则不设置 login_state（返回 None）。
+    """
+    names = _cookie_names_from_list(cookies)
+    if not names:
+        return None
+    lowers = [n.lower() for n in names]
+    hints = ("session", "sess", "sid", "auth", "token", "login", "user", "uid")
+    for n in lowers:
+        if any(h in n for h in hints):
+            return "logged_in"
+    return None
+
+
 def _build_not_exists(dom_summary: Dict[str, Any]) -> List[str]:
     els = dom_summary.get("elements") or []
     hits: set[str] = set()
@@ -343,13 +379,83 @@ def _make_skill(
         "url_matches": [url_pat],
         "exists": [primary] if primary else [],
     }
+
+    # not_exists:站点级遮罩/弹层黑名单（基于 dom_summary.class 关键词）
     not_exists = _build_not_exists(dom_summary)
     if not_exists:
         pre["not_exists"] = not_exists
 
-    # viewport minimal (only width for robustness)
-    # default desktop baseline 960 if unknown
-    pre["viewport"] = {"min_width": 960}
+    # viewport: 尽量使用采集时的真实视口，缺失时退回桌面基线
+    vp_raw = meta.get("viewport") if isinstance(meta, dict) else None
+    vp_w = 0
+    vp_h = 0
+    if isinstance(vp_raw, dict):
+        try:
+            vp_w = int(vp_raw.get("width") or 0)
+        except Exception:
+            vp_w = 0
+        try:
+            vp_h = int(vp_raw.get("height") or 0)
+        except Exception:
+            vp_h = 0
+    viewport: Dict[str, Any] = {}
+    if vp_w > 0:
+        # 允许一定缩放，保守取 80% 作为下界，但不要低于典型移动端宽度
+        viewport["min_width"] = max(320, int(vp_w * 0.8))
+    else:
+        # 未知时退回旧行为：桌面基线 960
+        viewport["min_width"] = 960
+    if vp_h > 0:
+        # 高度同样给一个保守下界，避免在极矮视口误用
+        viewport["min_height"] = max(400, int(vp_h * 0.8))
+    pre["viewport"] = viewport
+
+    # optional: 若控件在采集快照中明确可见且未严重遮挡，则要求其可见
+    try:
+        vis_flag = el.get("visible_adv")
+        if vis_flag is None:
+            vis_flag = el.get("visible")
+        occl = el.get("occlusion_ratio")
+        occ_val = float(occl) if occl is not None else None
+        in_vp = el.get("in_viewport")
+        opacity = el.get("opacity")
+        pointer = el.get("pointer_events")
+        if primary and bool(vis_flag) and (occ_val is None or occ_val < 0.9):
+            # 额外约束：在视口内且未被显式隐藏/禁用指针事件时，才认定为“可见”
+            if in_vp is not None and not bool(in_vp):
+                raise RuntimeError  # fallback to not adding visible
+            if isinstance(opacity, str) and opacity.strip() == "0":
+                raise RuntimeError
+            if isinstance(pointer, str) and pointer.strip().lower() == "none":
+                raise RuntimeError
+            pre.setdefault("visible", [])
+            if primary not in pre["visible"]:
+                pre["visible"].append(primary)
+    except Exception:
+        # 可见性信号缺失或不满足时不强加约束
+        pass
+
+    # optional: 为部分控件加入稳定文本片段作为弱约束，避免动态词片
+    try:
+        texts = _build_by_text(el)
+        if texts:
+            # 仅使用较短文本，降低被 A/B 文案轻易击穿的概率
+            stable = texts[0]
+            if stable and len(stable) <= 16:
+                pre.setdefault("text_contains", [])
+                if stable not in pre["text_contains"]:
+                    pre["text_contains"].append(stable)
+    except Exception:
+        pass
+
+    # optional: enabled — 交互控件默认要求“可用/未禁用”
+    try:
+        if primary:
+            pre.setdefault("enabled", [])
+            if primary not in pre["enabled"]:
+                pre["enabled"].append(primary)
+    except Exception:
+        pass
 
     # args schema
     args_schema = _args_schema_for_action(action)
@@ -396,6 +502,7 @@ def load_inputs(run_dir: str, *, verbose: bool = False) -> Inputs:
     p_ds = os.path.join(run_dir, "dom_summary.json")
     p_ax = os.path.join(run_dir, "ax.json")
     p_meta = os.path.join(run_dir, "meta.json")
+    p_ck = os.path.join(run_dir, "cookies.json")
     if verbose:
         print(f"[skill.build] load controls_tree: {p_ct}")
     controls_tree = _read_json(p_ct)  # type: ignore[assignment]
@@ -404,6 +511,31 @@ def load_inputs(run_dir: str, *, verbose: bool = False) -> Inputs:
     dom_summary = _read_json(p_ds)  # type: ignore[assignment]
     ax = _read_json(p_ax) if os.path.exists(p_ax) else {}  # type: ignore[assignment]
     meta = _read_json(p_meta) if os.path.exists(p_meta) else {}
+    # optional cookies: run_dir 级别的上下文 cookie 列表（用于 preconditions.cookies.set）
+    cookies: List[Dict[str, Any]] = []
+    if os.path.exists(p_ck):
+        try:
+            raw = _read_json(p_ck)  # type: ignore[assignment]
+            # 支持两种简单格式：顶层就是 list[dict]，或 {"cookies": list[dict]}
+            if isinstance(raw, dict):
+                raw_list = raw.get("cookies") or raw.get("set") or []
+            else:
+                raw_list = raw
+            for c in raw_list if isinstance(raw_list, list) else []:
+                if not isinstance(c, dict):
+                    continue
+                name = str(c.get("name") or "").strip()
+                value = "" if c.get("value") is None else str(c.get("value"))
+                if not name:
+                    continue
+                item: Dict[str, Any] = {"name": name, "value": value}
+                # 仅在存在时附带可选字段
+                for k in ("domain", "path", "url", "expires", "httpOnly", "secure", "sameSite"):
+                    if k in c:
+                        item[k] = c[k]
+                cookies.append(item)
+        except Exception:
+            cookies = []
     # load snippets index if present
     p_sn = os.path.join(run_dir, "snippets", "index.json")
     sn_map: Dict[str, str] = {}
@@ -421,8 +553,8 @@ def load_inputs(run_dir: str, *, verbose: bool = False) -> Inputs:
             sn_map = {}
     if verbose:
         nn = len((controls_tree or {}).get("nodes") or [])
-        print(f"[skill.build] nodes={nn}, snippets={len(sn_map)}")
-    return Inputs(run_dir=run_dir, controls_tree=controls_tree, dom_summary=dom_summary, ax=ax, meta=meta, snippets=sn_map)
+        print(f"[skill.build] nodes={nn}, snippets={len(sn_map)}, cookies={len(cookies)}")
+    return Inputs(run_dir=run_dir, controls_tree=controls_tree, dom_summary=dom_summary, ax=ax, meta=meta, snippets=sn_map, cookies=cookies)
 
 
 # ----------------------------- Snippet parsing -----------------------------
@@ -596,6 +728,10 @@ def build_skills(inp: Inputs, *, domain: Optional[str] = None, use_snippets: boo
         print("[skill.build] build skills …")
     skills: List[Dict[str, Any]] = []
     nodes = inp.controls_tree.get("nodes") or []
+    # 全局 cookies：若存在，则为每个技能附加到 preconditions.cookies.set / required_names，并推断 login_state
+    global_cookies: List[Dict[str, Any]] = list(inp.cookies or [])
+    cookie_names = _cookie_names_from_list(global_cookies)
+    global_login_state = infer_login_state_from_cookies(global_cookies)
     for n in nodes if isinstance(nodes, list) else []:
         if not _is_control(n):
             continue
@@ -604,6 +740,20 @@ def build_skills(inp: Inputs, *, domain: Optional[str] = None, use_snippets: boo
         idx = int(m.group(1)) if m else -1
         el = _element_from_index(inp.dom_summary, idx) if idx >= 0 else {}
         skill = _make_skill(n, el, inp.dom_summary, inp.meta, inp.run_dir, override_domain=domain)
+        # 若 run_dir 提供 cookies.json，则为技能附加统一 cookie 前置条件与名称摘要，并推断登录态
+        if global_cookies:
+            pre = skill.get("preconditions") or {}
+            cookies_obj = pre.get("cookies") or {}
+            if "set" not in cookies_obj:
+                # 为每个 skill 拷贝一份，避免后续修改时出现共享引用
+                cookies_obj["set"] = [dict(c) for c in global_cookies]
+            if cookie_names and "required_names" not in cookies_obj:
+                cookies_obj["required_names"] = list(cookie_names)
+            pre["cookies"] = cookies_obj
+            # login_state 仅在当前未显式设置时按启发式推断
+            if global_login_state and "login_state" not in pre:
+                pre["login_state"] = global_login_state
+            skill["preconditions"] = pre
         # optional refinement from snippet
         if use_snippets and node_id in inp.snippets:
             if verbose:
