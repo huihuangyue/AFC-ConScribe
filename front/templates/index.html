@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+  <meta charset="UTF-8">
+  <title>Browser Agent Control Panel</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script>
+    // 由后端注入的当前 run_dir，前端后续可用作调用后端 API 的参数
+    window.CURRENT_RUN_DIR = "{{ run_dir|default('') }}";
+  </script>
+</head>
+
+<body>
+  <div class="main-container">
+    <div class="browser-pane">
+      <div class="pane-header">🌐 实时浏览器视图 (VNC)</div>
+      <iframe src="{{ vnc_url }}" class="vnc-frame" id="vncFrame">
+      </iframe>
+    </div>
+
+    <div class="chat-pane">
+      <div class="pane-header">🤖 Agent 对话记录</div>
+
+      <div class="chat-history" id="chatHistory">
+        <div class="message agent-msg">
+          <div class="avatar">A</div>
+          <div class="bubble">你好！我是浏览器智能体。请输入任务，例如：“打开百度并搜索 Playwright”。</div>
+        </div>
+      </div>
+
+      <div class="input-area">
+        <textarea id="userInput" placeholder="在此输入自然语言任务..."></textarea>
+        <button onclick="sendTask()">提交任务</button>
+      </div>
+    </div>
+  </div>
+  <script src="/static/script.js"></script>
+</body>
+
+</html>
