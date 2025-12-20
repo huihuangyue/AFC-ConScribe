@@ -54,6 +54,8 @@ SAFE_BUILTINS = {
     "__import__": __import__,
     "Exception": Exception,
     "ValueError": ValueError,
+    # 允许在技能程序中显式使用常见异常类型（与提示文档保持一致）
+    "LookupError": LookupError,
     "BaseException": BaseException,
 }
 

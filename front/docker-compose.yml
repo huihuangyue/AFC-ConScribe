@@ -1,0 +1,26 @@
+version: "3.7"
+services:
+  # 运行 Chrome 浏览器 + VNC + noVNC + Selenium + CDP Chrome 的容器
+  chrome_vnc:
+    build:
+      context: ./docker
+      dockerfile: Dockerfile
+    container_name: browser_agent_target_v2
+    # 扩大共享内存，防止浏览器运行卡顿或崩溃
+    shm_size: "2gb"
+    ports:
+      # 4444: Selenium WebDriver 端口（http://localhost:4444/wd/hub）
+      - "4444:4444"
+      # 7900: noVNC 服务端口（在前端 iframe 中嵌入 http://localhost:7777）
+      - "7777:7900"
+      # 9222: CDP 端口（供 connect_over_cdp 使用；http://localhost:9222）
+      - "9222:9222"
+      # 9223: 通过 socat 转发到容器内 127.0.0.1:9222 的 CDP 端口（宿主机应使用 http://localhost:9223）
+      - "9223:9223"
+    environment:
+      # VNC 密码 (重要：正式环境请使用更安全的密码)
+      - VNC_PASSWORD=secret
+      # 设置容器启动时自动打开 VNC 界面
+      - START_VNC=true
+      # 设置浏览器启动时使用 VNC 显示
+      - SE_VNC_STATUS=true

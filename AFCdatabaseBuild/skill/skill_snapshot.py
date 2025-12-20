@@ -332,6 +332,22 @@ def build_skill_snapshot(run_dir: str | Path) -> Path:
         json.dumps(out_obj, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+    # 额外在“网址文件夹”（run_dir 的父目录）下写一份副本：
+    # workspace/data/<domain>/afc/<ts>__afc_skill_snapshot.json
+    try:
+        domain_dir = run_dir.parent
+        domain_afc_dir = domain_dir / "afc"
+        domain_afc_dir.mkdir(parents=True, exist_ok=True)
+        domain_out_path = domain_afc_dir / f"{run_dir.name}__afc_skill_snapshot.json"
+        domain_out_path.write_text(
+            json.dumps(out_obj, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        # 写副本失败不影响主路径
+        pass
+
     return out_path
 
 

@@ -16,8 +16,10 @@ CONTEXT_JSON:
 
 The JSON describes:
 - `abstract_skill_id`: current cluster id (derived from task_group/task_role/norm_label);
-- `current_task_group` / `current_task_role`: current coarse task group / role (often `UnknownGroup` / `UnknownRole`);
-- `norm_label`: normalized control label such as `Clickable_Submit`, `Clickable_Login`, `Clickable_MarketingCard`, `Link_Navigate`, `UnknownLabel`, etc.;
+- `current_task_group` / `current_task_role`: current coarse task group / role (sometimes already set by simple rules, otherwise `UnknownGroup` / `UnknownRole`);
+- `norm_label`: normalized control label such as:
+  - `Clickable_Submit`, `Clickable_Login`, `Clickable_MarketingCard`, `Link_Navigate`,
+  - `Editable_SearchBox`, `Editable_Textfield`, `UnknownLabel`, etc.;
 - `action`: typical UI action (`click`, `navigate`, `none`, ...);
 - `afc_control_ids`: ids of concrete controls that belong to this cluster (for your reference only);
 - `skills`: concrete skill implementations, each with `id`, `action`, `description`, and `preconditions`;
@@ -25,11 +27,27 @@ The JSON describes:
 - `current_env_sensitivity`: an existing environment-sensitivity summary if any.
 
 Your task:
-1) Based on the skills' descriptions, actions and preconditions, assign:
+1) Based on the skills' descriptions, actions, preconditions and the `norm_label`, assign:
    - `task_group`: a short high-level task family, e.g.
-     `HotelSearch`, `Login`, `Booking`, `Marketing`, `Navigation`, `Profile`, `Misc`, ...
+     - generic: `Login`, `Auth`, `Search`, `Booking`, `Marketing`, `Navigation`, `Profile`, `Misc`, ...
+     - e-commerce style examples (if applicable): `ProductSearch`, `ProductDetail`, `Cart`, `Checkout`, `Order`, `Account`, `Home`.
    - `task_role`: a short role within the task, e.g.
-     `Submit`, `Search`, `OpenDetail`, `ViewMarketingCard`, `Login`, `Logout`, `Filter`, `Navigate`, ...
+     `Submit`, `Search`, `OpenDetail`, `ViewMarketingCard`, `Login`, `Logout`, `Filter`, `Navigate`, `AddToCart`, `Checkout`, ...
+
+   Use the following mapping hints when reasonable (do not follow blindly if skills clearly indicate something else):
+   - If `norm_label = "Clickable_Login"` or descriptions mention login / sign in:
+     - prefer `task_group = "Auth"` and `task_role = "Login"`.
+   - If `norm_label = "Editable_SearchBox"` or `Clickable_Submit` used to trigger search:
+     - prefer `task_group = "Search"` or `ProductSearch`,
+     - and `task_role = "EnterQuery"` (for the input) or `Submit` (for the button).
+   - If `norm_label = "Clickable_MarketingCard"`:
+     - prefer `task_group = "Marketing"`, `task_role = "ViewCard"` or `OpenPromotion`.
+   - If `norm_label = "Link_Navigate"` and preconditions / descriptions show simple navigation:
+     - prefer `task_group = "Navigation"`, `task_role = "Navigate"`.
+   - If `norm_label = "UnknownLabel"` and there is no clear semantic grouping:
+     - you may keep `task_group = "Misc"` and choose a generic task_role like `GenericClick` or `GenericControl`.
+
+   Try to avoid leaving `UnknownGroup` / `UnknownRole` unless the intent is truly unclear.
 2) Produce an English `semantic_text`: one sentence describing what this abstract skill does at the task level
    (e.g. `"Submit hotel search form"`, `"Open a marketing promotion card"`, `"Navigate to login page"`).
 3) Summarize environment sensitivity as a JSON object `env_sensitivity`, aggregating from skills' preconditions.

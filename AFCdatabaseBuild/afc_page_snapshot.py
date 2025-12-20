@@ -557,6 +557,45 @@ def _build_afc_control(
             # 通过前面的规则和 LLM，我们尽量让 UnknownLabel 的比例下降，但不会用改名来隐藏它。
             sig["norm_label"] = "UnknownLabel"
 
+    # 规则层：根据 norm_label + 文本，为后续抽象技能聚合提供一个初步的 task_group/task_role 提示。
+    # 注意：
+    #   - 这里只做“弱标签”，只在 semantic_signature 中尚未设置 task_group/task_role 时才填入；
+    #   - LLM 抽象层（LLM_abstract_skill）仍然可以在此基础上做进一步 refine。
+    tg = (sig.get("task_group") or "").strip()
+    tr = (sig.get("task_role") or "").strip()
+    if not tg or not tr:
+        norm = (sig.get("norm_label") or "").strip()
+        text_all = "".join(sig.get("clean_text") or clean_text_tokens)
+        text_lower = text_all.lower()
+
+        # 登录 / 退出 / 注册等认证相关控件
+        if norm == "Clickable_Login" or any(k in text_all for k in ("登录", "登錄", "登入")) or "login" in text_lower:
+            tg = tg or "Auth"
+            tr = tr or "Login"
+        # 搜索框 / 搜索提交按钮
+        elif norm in ("Editable_SearchBox", "Clickable_Submit") and (
+            any(k in text_all for k in ("搜索", "查找", "查询"))
+            or "search" in text_lower
+        ):
+            tg = tg or "Search"
+            if norm == "Editable_SearchBox":
+                tr = tr or "EnterQuery"
+            else:
+                tr = tr or "Submit"
+        # 明显的营销/推荐卡片
+        elif norm == "Clickable_MarketingCard":
+            tg = tg or "Marketing"
+            tr = tr or "ViewCard"
+        # 一般导航链接
+        elif norm == "Link_Navigate":
+            tg = tg or "Navigation"
+            tr = tr or "Navigate"
+
+        if tg:
+            sig["task_group"] = tg
+        if tr:
+            sig["task_role"] = tr
+
     return afc
 
 
@@ -619,6 +658,24 @@ def _save_snapshot(
     )
     if verbose:
         print(f"[afcdb] [_save_snapshot] wrote snapshot to {snapshot_path}")
+
+    # 额外写一份到“网址文件夹”（run_dir 的父目录）下，便于按站点聚合：
+    # workspace/data/<domain>/afc/<ts>__afc_page_snapshot.json
+    try:
+        domain_dir = run_dir.parent
+        domain_afc_dir = domain_dir / "afc"
+        domain_afc_dir.mkdir(parents=True, exist_ok=True)
+        domain_snapshot_path = domain_afc_dir / f"{run_dir.name}__afc_page_snapshot.json"
+        domain_snapshot_path.write_text(
+            json.dumps(snapshot, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        if verbose:
+            print(f"[afcdb] [_save_snapshot] wrote domain-level snapshot to {domain_snapshot_path}")
+    except Exception as e:  # pragma: no cover - 写额外副本失败不算致命
+        if verbose:
+            print(f"[afcdb] [_save_snapshot] WARN: failed to write domain-level snapshot: {e}")
+
     return snapshot_path
 
 

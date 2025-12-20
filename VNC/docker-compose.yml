@@ -1,0 +1,20 @@
+version: "3.7"
+services:
+  # 运行 Chrome 浏览器和 VNC 服务的容器
+  chrome_vnc:
+    image: selenium/standalone-chrome:latest
+    container_name: browser_agent_target
+    # 扩大共享内存，防止浏览器运行卡顿或崩溃
+    shm_size: "2gb"
+    ports:
+      # 4444: Selenium/Playwright 远程控制的端口
+      - "4444:4444"
+      # 7900: noVNC 服务的端口 (这是你浏览器画面的入口)
+      - "7900:7900"
+    environment:
+      # VNC 密码 (重要：正式环境请使用更安全的密码)
+      - VNC_PASSWORD=secret
+      # 设置容器启动时自动打开 VNC 界面
+      - START_VNC=true
+      # 设置浏览器启动时使用 VNC 显示
+      - SE_VNC_STATUS=true

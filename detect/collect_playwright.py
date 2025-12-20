@@ -663,18 +663,84 @@ def collect(
             except Exception as we:
                 warnings.append({"code": "AX_WRITE_ERROR", "stage": "ax", "error": str(we)})
 
-            # dom_summary.json — lightweight DOM table via helper JS (advanced)
+            # dom_summary.json — lightweight DOM table
+            # 优先使用 helper JS 的高级版本；若因 CSP/注入失败导致不可用，则退化为内联 DOM 扫描（不依赖 DetectHelpers）。
+            # 1) 高级路径：依赖 window.DetectHelpers.getDomSummaryAdvanced（若可用）
             try:
                 if injected_helpers:
                     dom_summary = page.evaluate(
-                        "(p) => window.DetectHelpers.getDomSummaryAdvanced(p.limit, p.opts)",
+                        "(p) => window.DetectHelpers && window.DetectHelpers.getDomSummaryAdvanced ? window.DetectHelpers.getDomSummaryAdvanced(p.limit, p.opts) : []",
                         {"limit": 20000, "opts": {"occlusionStep": 8}},
                     )
                 else:
-                    dom_summary = page.evaluate("Array.from(document.querySelectorAll('*')).slice(0, 500).map((e,i)=>({index:i,tag:(e.tagName||'').toLowerCase(),id:e.id||null}))")
+                    dom_summary = []
             except Exception as de:
-                dom_summary = []
+                # 记录高级路径的错误，随后尝试简单兜底方案
                 warnings.append({"code": "DOM_SUMMARY_ERROR", "stage": "dom_summary", "error": str(de)})
+                dom_summary = []
+
+            # 2) 兜底路径：不依赖 DetectHelpers，直接在 evaluate 中遍历 DOM
+            if not isinstance(dom_summary, list) or not dom_summary:
+                try:
+                    dom_summary = page.evaluate(
+                        """
+                        (p) => {
+                          const limit = (p && p.limit) ? Number(p.limit) : 20000;
+                          const nodes = Array.from(document.querySelectorAll('*'));
+                          const result = [];
+                          const clamp = (s, n) => (s || '').slice(0, n);
+                          for (let i = 0; i < nodes.length && result.length < limit; i++) {
+                            const e = nodes[i];
+                            if (!e || typeof e.getBoundingClientRect !== 'function') continue;
+                            const r = e.getBoundingClientRect();
+                            if (!r || typeof r.width === 'undefined' || typeof r.height === 'undefined') continue;
+                            const cs = getComputedStyle(e);
+                            const aria = {};
+                            try {
+                              const attrs = (typeof e.getAttributeNames === 'function') ? e.getAttributeNames() : [];
+                              for (const attr of attrs) {
+                                if (attr && attr.startsWith('aria-')) aria[attr] = e.getAttribute(attr);
+                              }
+                            } catch (_) {}
+                            const visible = (r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none');
+                            result.push({
+                              index: i,
+                              tag: (e.tagName || '').toLowerCase(),
+                              id: e.id || null,
+                              class: e.className || null,
+                              role: e.getAttribute('role') || null,
+                              name: e.getAttribute('name') || null,
+                              aria,
+                              bbox: [
+                                Math.round(r.x),
+                                Math.round(r.y),
+                                Math.round(r.width),
+                                Math.round(r.height)
+                              ],
+                              page_bbox: [
+                                Math.round(r.x + (window.scrollX || window.pageXOffset || 0)),
+                                Math.round(r.y + (window.scrollY || window.pageYOffset || 0)),
+                                Math.round(r.width),
+                                Math.round(r.height)
+                              ],
+                              visible,
+                              text: clamp(e.innerText, 160),
+                            });
+                          }
+                          return result;
+                        }
+                        """,
+                        {"limit": 20000},
+                    )
+                except Exception as de_fallback:
+                    dom_summary = []
+                    warnings.append(
+                        {
+                            "code": "DOM_SUMMARY_FALLBACK_ERROR",
+                            "stage": "dom_summary",
+                            "error": str(de_fallback),
+                        }
+                    )
             try:
                 write_json(os.path.join(out_dir, ARTIFACTS["dom_summary"]), {
                     "count": len(dom_summary) if isinstance(dom_summary, list) else 0,

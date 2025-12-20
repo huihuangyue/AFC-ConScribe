@@ -21,8 +21,15 @@ Usage:
 from __future__ import annotations
 
 from contextlib import contextmanager
+import os
+import json as _json
 from typing import Iterator, Optional, Tuple, List, Dict, Any
 
+try:
+    # 用于在 CDP 模式下手动解析 http://host:port/json/version，避免 Playwright 内部 HTTP 客户端兼容性问题。
+    import urllib.request as _urllib_request  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover
+    _urllib_request = None  # type: ignore[assignment]
 from playwright.sync_api import sync_playwright
 
 
@@ -204,6 +211,35 @@ def _sanitize_cookies(cookies: Optional[List[Dict[str, Any]]]) -> List[Dict[str,
     return out
 
 
+def _resolve_cdp_ws_url(endpoint: str) -> str:
+    """给定一个 CDP 端点，尽力解析出可用的 webSocketDebuggerUrl。
+
+    支持两种形式：
+      - http://host:9222      → 通过 /json/version 解析 webSocketDebuggerUrl
+      - ws://host:9222/...    → 直接返回
+    """
+    ep = (endpoint or "").strip()
+    if ep.startswith("ws://") or ep.startswith("wss://"):
+        return ep
+    if not ep.startswith("http://") and not ep.startswith("https://"):
+        # 简单兜底：当成 ws:// 直接返回，交给上层报错
+        return f"ws://{ep}"
+    if _urllib_request is None:
+        # 无法解析，只能直接返回原始 HTTP 端点
+        return ep
+    try:
+        url = ep.rstrip("/") + "/json/version"
+        with _urllib_request.urlopen(url, timeout=3.0) as resp:  # type: ignore[arg-type]
+            data = resp.read().decode("utf-8", errors="ignore")
+        meta = _json.loads(data) if data else {}
+        ws = meta.get("webSocketDebuggerUrl") or ""
+        if isinstance(ws, str) and ws.strip():
+            return ws.strip()
+    except Exception:
+        pass
+    return ep
+
+
 @contextmanager
 def make_env(
     url: Optional[str] = None,
@@ -217,10 +253,46 @@ def make_env(
     """Context manager to create a PWEnv ready for Program execution.
 
     headless=True by default; set False to run headed.
+
+    远程浏览器支持（实验特性）：
+      - 若环境变量 AFC_BROWSER_BACKEND=remote_ws 且同时设置：
+            AFC_PLAYWRIGHT_REMOTE_WS 或 AFC_PLAYWRIGHT_WS_URL
+        则本函数不会本地 launch() 浏览器，而是通过
+            pw.chromium.connect(<WS URL>)
+        连接到一个已经运行的 Playwright 远程服务。
+      - 这种模式下，headless/slow_mo 由远程服务决定，函数参数只控制
+        超时、cookies、是否在最后关闭 Browser。
     """
     with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=headless, slow_mo=(slow_mo or 0))
-        context = browser.new_context()
+        backend = os.getenv("AFC_BROWSER_BACKEND", "local").strip().lower()
+        remote_ws = os.getenv("AFC_PLAYWRIGHT_REMOTE_WS") or os.getenv("AFC_PLAYWRIGHT_WS_URL")
+        cdp_url = os.getenv("AFC_PLAYWRIGHT_CDP_URL") or os.getenv("AFC_PLAYWRIGHT_REMOTE_CDP")
+
+        browser = None
+
+        if backend in {"remote_ws", "remote", "connect"} and remote_ws:
+            # 远程 WS 模式：连接到已经运行的 Playwright 远程服务（通常是 playwright run-server）
+            browser = pw.chromium.connect(remote_ws)
+        elif backend in {"cdp", "remote_cdp"} and cdp_url:
+            # CDP 模式：通过 Chrome DevTools Protocol 连接到一只已经存在的有头 Chrome。
+            # 为了规避部分环境下 Playwright 内部 HTTP 客户端与 DevTools 交互的兼容性问题，
+            # 我们在这里手动解析 /json/version 拿到 webSocketDebuggerUrl，再传给 connect_over_cdp。
+            ws_url = _resolve_cdp_ws_url(cdp_url)
+            browser = pw.chromium.connect_over_cdp(ws_url)
+        else:
+            # 本地模式（默认）：直接在当前机器上启动 Chromium
+            browser = pw.chromium.launch(headless=headless, slow_mo=(slow_mo or 0))
+
+        # 选择 context/page 策略：
+        #   - CDP 模式下优先复用现有 context/page，这样技能会在“当前界面”执行，而不是新开窗口；
+        #   - 其他模式下仍然为每次调用创建新的 context/page，避免相互影响。
+        if backend in {"cdp", "remote_cdp"}:
+            if browser.contexts:
+                context = browser.contexts[0]
+            else:
+                context = browser.new_context()
+        else:
+            context = browser.new_context()
         # Pre-set cookies on the fresh context if provided
         try:
             ck = _sanitize_cookies(cookies)
@@ -228,14 +300,35 @@ def make_env(
                 context.add_cookies(ck)
         except Exception:
             pass
-        page = context.new_page()
+        if backend in {"cdp", "remote_cdp"} and context.pages:
+            page = context.pages[0]
+        else:
+            page = context.new_page()
         if isinstance(default_timeout_ms, int) and default_timeout_ms > 0:
             try:
                 page.set_default_timeout(int(default_timeout_ms))
             except Exception:
                 pass
         if url:
-            page.goto(url, wait_until="domcontentloaded")
+            # 在 CDP 复用场景下，偶尔会遇到 Playwright 报错
+            # "Frame has been detached." —— 典型原因是页面在我们调用前已被关闭或分离。
+            # 这里做一次“容错重试”：若首次 goto 失败，则新建页面再尝试一次；
+            # 若仍然失败，则将原始异常抛给上层，保持可观察性。
+            try:
+                page.goto(url, wait_until="domcontentloaded")
+            except Exception as e:  # pragma: no cover - 仅在异常路径触发
+                try:
+                    # 尽量复用原 context，新建 page 再导航
+                    page = context.new_page()
+                    if isinstance(default_timeout_ms, int) and default_timeout_ms > 0:
+                        try:
+                            page.set_default_timeout(int(default_timeout_ms))
+                        except Exception:
+                            pass
+                    page.goto(url, wait_until="domcontentloaded")
+                except Exception:
+                    # 二次尝试仍失败时，将原错误抛出，方便调用方看到真实原因
+                    raise e
         try:
             yield PWEnv(page)
         finally:
@@ -248,7 +341,10 @@ def make_env(
                     context.close()
                 except Exception:
                     pass
-                try:
-                    browser.close()
-                except Exception:
-                    pass
+                # 对于 CDP 模式，我们通常希望保持远程 Chrome 打开，仅断开当前页面/上下文；
+                # 因此此处仅在非 CDP 模式下关闭 browser。
+                if backend not in {"cdp", "remote_cdp"}:
+                    try:
+                        browser.close()
+                    except Exception:
+                        pass
